@@ -295,7 +295,7 @@ class Request(swob.Request):
             return VersioningController
 
         unsupported = ('notification', 'policy', 'requestPayment', 'torrent',
-                       'website', 'cors', 'tagging', 'restore')
+                       'website', 'cors', 'tagging')
         if set(unsupported) & set(self.params):
             return UnsupportedController
 
@@ -380,6 +380,7 @@ class Request(swob.Request):
                 ],
                 'PUT': [
                     HTTP_CREATED,
+                    HTTP_OK,
                 ],
                 'POST': [
                     HTTP_NO_CONTENT,
@@ -403,6 +404,9 @@ class Request(swob.Request):
                 ],
                 'PUT': [
                     HTTP_CREATED,
+                ],
+                'POST': [
+                    HTTP_ACCEPTED,
                 ],
                 'DELETE': [
                     HTTP_NO_CONTENT,
@@ -460,6 +464,9 @@ class Request(swob.Request):
                     HTTP_REQUEST_ENTITY_TOO_LARGE: EntityTooLarge,
                     HTTP_LENGTH_REQUIRED: MissingContentLength,
                 },
+                'POST': {
+                    HTTP_BAD_REQUEST: (InvalidURI, self.path_info),
+                },
                 'DELETE': {
                     HTTP_NOT_FOUND: (NoSuchKey, self.object_name),
                 },
@@ -473,6 +480,7 @@ class Request(swob.Request):
         Response object that wraps up the application's result.
         """
         method = method or self.environ['REQUEST_METHOD']
+        query = query or self.params
         sw_req = self.to_swift_req(method=method, query=query)
         sw_resp = sw_req.get_response(app)
         resp = Response.from_swift_resp(sw_resp)
@@ -492,6 +500,9 @@ class Request(swob.Request):
         error_codes = self._swift_error_codes(method)
 
         if status in success_codes:
+            return resp
+
+        if 'X-Lifecycle-Response' in resp.headers:
             return resp
 
         err_msg = resp.body

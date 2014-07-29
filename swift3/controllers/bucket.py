@@ -63,8 +63,15 @@ class BucketController(Controller):
             query.update({'prefix': req.params['prefix']})
         if 'delimiter' in req.params:
             query.update({'delimiter': req.params['delimiter']})
+        if 'lifecycle' in req.params:
+            query.update({'lifecycle': req.params['lifecycle']})
+        if 'lifecycle_rule' in req.params:
+            query.update({'lifecycle_rule': req.params['lifecycle_rule']})
 
         resp = req.get_response(self.app, query=query)
+
+        if 'X-Lifecycle-Response' in resp.headers:
+            return resp
 
         objects = loads(resp.body)
 
@@ -123,6 +130,10 @@ class BucketController(Controller):
                 req.headers[header] = acl
 
         xml = req.xml(MAX_PUT_BUCKET_BODY_SIZE)
+
+        if req.query_string in ('lifecycle', 'lifecycle_rule'):
+            xml = None
+
         if xml:
             # check location
             try:
