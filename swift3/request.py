@@ -407,6 +407,7 @@ class Request(swob.Request):
                 ],
                 'POST': [
                     HTTP_ACCEPTED,
+                    HTTP_OK,
                 ],
                 'DELETE': [
                     HTTP_NO_CONTENT,
