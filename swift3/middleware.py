@@ -79,7 +79,7 @@ def validate_bucket_name(name):
     """
 
     if '_' in name or len(name) < 3 or len(name) > 63 or not \
-            name[-1].isalnum():
+        name[-1].isalnum():
         # Bucket names should not contain underscores (_)
         # Bucket names must end with a lowercase letter or number
         # Bucket names should be between 3 and 63 characters long
@@ -99,12 +99,16 @@ def validate_bucket_name(name):
 
 class Swift3Middleware(object):
     """Swift3 S3 compatibility midleware"""
+
     def __init__(self, app, *args, **kwargs):
         self.app = app
         self.logger = get_logger(CONF, log_route='swift3')
+        self.storage_domain = CONF.get('storage_domain', 'example.com')
 
     def __call__(self, env, start_response):
         try:
+            # SubdomainCallingFormat
+            self.domain_remap(env)
             req = Request(env)
             resp = self.handle_request(req)
         except NotS3Request:
@@ -122,6 +126,44 @@ class Swift3Middleware(object):
             resp.headers['x-amz-request-id'] = env['swift.trans_id']
 
         return resp(env, start_response)
+
+    def domain_remap(self, env):
+        if not self.storage_domain:
+            return
+
+        key = None
+        if 'HTTP_HOST' in env:
+            key = 'HTTP_HOST'
+        elif 'SERVER_NAME' in env:
+            key = 'SERVER_NAME'
+
+        if not key:
+            return
+
+        given_domain = env[key]
+        if not given_domain:
+            return
+
+        # remove port
+        if ':' in given_domain:
+            given_domain = given_domain.rsplit(':', 1)[0]
+            if not given_domain:
+                return
+
+        dotted_storage_domain = '.' + self.storage_domain
+        if not given_domain.endswith(dotted_storage_domain):
+            return
+
+        bucket_name = given_domain[:-len(dotted_storage_domain)]
+        if not bucket_name:
+            return
+
+        env['PATH_INFO'] = '/' + bucket_name + env['PATH_INFO']
+        env['RAW_PATH_INFO'] = env['PATH_INFO']
+        env[key] = env[key][len(bucket_name)+1:]
+
+        self.logger.debug('Calling Swift3 Middleware - Domain is remapped')
+
 
     def handle_request(self, req):
         self.logger.debug('Calling Swift3 Middleware')
