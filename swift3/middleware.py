@@ -131,14 +131,24 @@ class Swift3Middleware(object):
         if not self.storage_domain:
             return
 
+        key = None
         if 'HTTP_HOST' in env:
-            given_domain = env['HTTP_HOST']
-        else:
-            given_domain = env['SERVER_NAME']
+            key = 'HTTP_HOST'
+        elif 'SERVER_NAME' in env:
+            key = 'SERVER_NAME'
 
-        port = ''
+        if not key:
+            return
+
+        given_domain = env[key]
+        if not given_domain:
+            return
+
+        # remove port
         if ':' in given_domain:
-            given_domain, port = given_domain.rsplit(':', 1)
+            given_domain = given_domain.rsplit(':', 1)[0]
+            if not given_domain:
+                return
 
         dotted_storage_domain = '.' + self.storage_domain
         if not given_domain.endswith(dotted_storage_domain):
@@ -150,15 +160,7 @@ class Swift3Middleware(object):
 
         env['PATH_INFO'] = '/' + bucket_name + env['PATH_INFO']
         env['RAW_PATH_INFO'] = env['PATH_INFO']
-
-        new_storage_domain = self.storage_domain
-        if port != '':
-            new_storage_domain = new_storage_domain + ":" + port
-
-        if 'HTTP_HOST' in env:
-            env['HTTP_HOST'] = new_storage_domain
-        else:
-            env['SERVER_NAME'] = new_storage_domain
+        env[key] = env[key][len(bucket_name)+1:]
 
         self.logger.debug('Calling Swift3 Middleware - Domain is remapped')
 
