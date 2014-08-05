@@ -91,7 +91,7 @@ class Response(ResponseBase, swob.Response):
                 headers['x-amz-meta-' + key[14:]] = val
             elif _key in ('content-length', 'content-type',
                           'content-range', 'content-encoding',
-                          'etag', 'last-modified', 'x-object-manifest'):
+                          'etag', 'last-modified'):
                 headers[key] = val
             elif _key == 'x-container-object-count':
                 # for ceph/s3tests
