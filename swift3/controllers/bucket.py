@@ -17,6 +17,7 @@ from simplejson import loads
 
 from swift.common.http import HTTP_OK
 from swift.common.utils import get_logger
+from swift.common.wsgi import make_pre_authed_request
 
 from swift3.controllers.base import Controller
 from swift3.controllers.acl import add_canonical_user, swift_acl_translate
@@ -88,6 +89,16 @@ class BucketController(Controller):
         SubElement(elem, 'IsTruncated').text = is_truncated
 
         for o in objects[:max_keys]:
+            path = resp.request.path_info + '/' + o['name']
+            oreq = make_pre_authed_request(req.environ, method='HEAD',
+                                           path=path)
+            oresp = oreq.get_response(self.app)
+            if 'X-Object-Meta-Glacier' in oresp.headers:
+                o['class'] = 'GLACIER'
+            else:
+                o['class'] = 'STANDARD'
+
+        for o in objects[:max_keys]:
             if 'subdir' not in o:
                 contents = SubElement(elem, 'Contents')
                 SubElement(contents, 'Key').text = o['name']
@@ -96,7 +107,7 @@ class BucketController(Controller):
                 SubElement(contents, 'ETag').text = o['hash']
                 SubElement(contents, 'Size').text = str(o['bytes'])
                 add_canonical_user(contents, 'Owner', req.user_id)
-                SubElement(contents, 'StorageClass').text = 'STANDARD'
+                SubElement(contents, 'StorageClass').text = o['class']
 
         for o in objects[:max_keys]:
             if 'subdir' in o:
