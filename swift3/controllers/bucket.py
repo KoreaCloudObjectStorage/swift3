@@ -17,6 +17,7 @@ from simplejson import loads
 
 from swift.common.http import HTTP_OK
 from swift.common.utils import get_logger
+from swift.common.wsgi import make_pre_authed_request
 
 from swift3.controllers.base import Controller
 from swift3.controllers.acl import add_canonical_user, swift_acl_translate
@@ -63,8 +64,15 @@ class BucketController(Controller):
             query.update({'prefix': req.params['prefix']})
         if 'delimiter' in req.params:
             query.update({'delimiter': req.params['delimiter']})
+        if 'lifecycle' in req.params:
+            query.update({'lifecycle': req.params['lifecycle']})
+        if 'lifecycle_rule' in req.params:
+            query.update({'lifecycle_rule': req.params['lifecycle_rule']})
 
         resp = req.get_response(self.app, query=query)
+
+        if 'X-Lifecycle-Response' in resp.headers:
+            return resp
 
         objects = loads(resp.body)
 
@@ -81,6 +89,16 @@ class BucketController(Controller):
         SubElement(elem, 'IsTruncated').text = is_truncated
 
         for o in objects[:max_keys]:
+            path = resp.request.path_info + '/' + o['name']
+            oreq = make_pre_authed_request(req.environ, method='HEAD',
+                                           path=path)
+            oresp = oreq.get_response(self.app)
+            if 'X-Object-Meta-Glacier' in oresp.headers:
+                o['class'] = 'GLACIER'
+            else:
+                o['class'] = 'STANDARD'
+
+        for o in objects[:max_keys]:
             if 'subdir' not in o:
                 contents = SubElement(elem, 'Contents')
                 SubElement(contents, 'Key').text = o['name']
@@ -89,7 +107,7 @@ class BucketController(Controller):
                 SubElement(contents, 'ETag').text = o['hash']
                 SubElement(contents, 'Size').text = str(o['bytes'])
                 add_canonical_user(contents, 'Owner', req.user_id)
-                SubElement(contents, 'StorageClass').text = 'STANDARD'
+                SubElement(contents, 'StorageClass').text = o['class']
 
         for o in objects[:max_keys]:
             if 'subdir' in o:
@@ -123,6 +141,10 @@ class BucketController(Controller):
                 req.headers[header] = acl
 
         xml = req.xml(MAX_PUT_BUCKET_BODY_SIZE)
+
+        if req.query_string in ('lifecycle', 'lifecycle_rule'):
+            xml = None
+
         if xml:
             # check location
             try:

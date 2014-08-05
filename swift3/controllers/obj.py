@@ -66,7 +66,7 @@ class ObjectController(Controller):
         return resp
 
     def POST(self, req):
-        raise AccessDenied()
+        return req.get_response(self.app)
 
     def DELETE(self, req):
         """
