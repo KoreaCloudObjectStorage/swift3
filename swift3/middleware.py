@@ -107,10 +107,11 @@ class Swift3Middleware(object):
 
     def __call__(self, env, start_response):
         try:
-            # SubdomainCallingFormat
+            # CORS
             resp = self.cors(env)
 
             if not resp:
+                # SubdomainCallingFormat
                 self.domain_remap(env)
                 req = Request(env)
                 resp = self.handle_request(req)
