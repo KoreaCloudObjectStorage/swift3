@@ -58,7 +58,7 @@ from swift.common.utils import get_logger
 
 from swift3.exception import NotS3Request
 from swift3.request import Request
-from swift3.response import ErrorResponse, InternalError, MethodNotAllowed, \
+from swift3.response import HTTPOk, ErrorResponse, InternalError, MethodNotAllowed, \
     ResponseBase
 from swift3.cfg import CONF
 
@@ -107,10 +107,14 @@ class Swift3Middleware(object):
 
     def __call__(self, env, start_response):
         try:
-            # SubdomainCallingFormat
-            self.domain_remap(env)
-            req = Request(env)
-            resp = self.handle_request(req)
+            # CORS
+            resp = self.cors(env)
+
+            if not resp:
+                # SubdomainCallingFormat
+                self.domain_remap(env)
+                req = Request(env)
+                resp = self.handle_request(req)
         except NotS3Request:
             resp = self.app
         except ErrorResponse as err_resp:
@@ -126,6 +130,23 @@ class Swift3Middleware(object):
             resp.headers['x-amz-request-id'] = env['swift.trans_id']
 
         return resp(env, start_response)
+
+    def cors(self, env):
+        method = env['REQUEST_METHOD'] if 'REQUEST_METHOD' in env else None
+        if method != 'OPTIONS':
+            return
+
+        resp = HTTPOk()
+        resp.headers = dict()
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Methods'] = 'GET, PUT, POST, DELETE, HEAD'
+        resp.headers['Access-Control-Allow-Headers'] = 'content-type'
+        resp.headers['Access-Control-Max-Age'] = '3000'
+        resp.headers['Vary'] = 'Origin, Access-Control-Request-Headers, Access-Control-Request-Method'
+        resp.headers['Content-Length'] = '0'
+
+        return resp
+
 
     def domain_remap(self, env):
         if not self.storage_domain:
@@ -160,7 +181,7 @@ class Swift3Middleware(object):
 
         env['PATH_INFO'] = '/' + bucket_name + env['PATH_INFO']
         env['RAW_PATH_INFO'] = env['PATH_INFO']
-        env[key] = env[key][len(bucket_name)+1:]
+        env[key] = env[key][len(bucket_name) + 1:]
 
         self.logger.debug('Calling Swift3 Middleware - Domain is remapped')
 
