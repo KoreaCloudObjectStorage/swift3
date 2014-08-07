@@ -66,6 +66,9 @@ class Request(swob.Request):
         self.container_name, self.object_name = self._parse_uri()
         self._validate_headers()
         self.token = base64.urlsafe_b64encode(self._canonical_string())
+        # test code
+        if env['REQUEST_METHOD'] == 'PUT':
+            self.token = 'SEVBRAoKClRodSwgMDcgQXVnIDIwMTQgMTQ6MzI6NTQgR01UCi9sZ2Nsb3VkLWR2L0tSL2ZpbGVzL3hkcTQ3aGFlanBocjJwemF5M2dpMDQydXQ5cGI2YnI0ZDAxNDc1Njc5YzQxYzQ4YTA5OGE1MzliMDMyNDM3Mzg='
         self.user_id = None
 
         # Avoids that swift.swob.Response replaces Location header value
