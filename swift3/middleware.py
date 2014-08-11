@@ -217,8 +217,9 @@ class Swift3Middleware(object):
         if 'awsaccesskeyid' in attributes and 'signature' in attributes:
             env[env_key] = 'AWS ' + attributes['awsaccesskeyid'] + ':' + attributes['signature']
 
-        # test code
-        env['HTTP_AUTHORIZATION'] = 'AWS 62776264e8f54951b6de24038f48276a:+edcPqoTdQg2ihKHVwj6vybN55k='
+        env_key = 'POLICY'
+        if 'policy' in attributes:
+            env[env_key] = attributes['policy']
 
         env_key = 'PATH_INFO'
         if 'key' in attributes:
