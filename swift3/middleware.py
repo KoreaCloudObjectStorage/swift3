@@ -53,8 +53,13 @@ following for an SAIO setup::
 """
 
 import re
+import rfc822
+
+from cStringIO import StringIO
 
 from swift.common.utils import get_logger
+from swift.common.middleware.formpost import _parse_attrs
+from swift.common.middleware.formpost import _iter_requests
 
 from swift3.exception import NotS3Request
 from swift3.request import Request
@@ -69,6 +74,9 @@ ALLOWED_SUB_RESOURCES = sorted([
     'partNumber', 'policy', 'requestPayment', 'torrent', 'uploads', 'uploadId',
     'versionId', 'versioning', 'versions ', 'website'
 ])
+
+#: The size of data to read from the form at any given time.
+READ_CHUNK_SIZE = 4096
 
 
 def validate_bucket_name(name):
@@ -113,7 +121,12 @@ class Swift3Middleware(object):
             if not resp:
                 # SubdomainCallingFormat
                 self.domain_remap(env)
+
+                # POST
+                self.post_request(env)
+
                 req = Request(env)
+
                 resp = self.handle_request(req)
         except NotS3Request:
             resp = self.app
@@ -185,6 +198,60 @@ class Swift3Middleware(object):
 
         self.logger.debug('Calling Swift3 Middleware - Domain is remapped')
 
+
+    def post_request(self, env):
+        if env.get('REQUEST_METHOD') != 'POST':
+            return
+
+        content_type, attrs = _parse_attrs(env.get('CONTENT_TYPE') or '')
+        if content_type != 'multipart/form-data' or 'boundary' not in attrs:
+            return
+
+        attributes = self._translate_form(env, attrs['boundary'])
+
+        del env['CONTENT_TYPE']
+
+        env['REQUEST_METHOD'] = 'PUT'
+
+        env_key = 'HTTP_AUTHORIZATION'
+        if 'awsaccesskeyid' in attributes and 'signature' in attributes:
+            env[env_key] = 'AWS ' + attributes['awsaccesskeyid'] + ':' + attributes['signature']
+
+        env_key = 'POLICY'
+        if 'policy' in attributes:
+            env[env_key] = attributes['policy']
+
+        env_key = 'PATH_INFO'
+        if 'key' in attributes:
+            env[env_key] += attributes['key'].lstrip('/')
+            env['RAW_PATH_INFO'] = env[env_key]
+
+        env_key = 'CONTENT_LENGTH'
+        if 'file' in attributes:
+            data = attributes['file']
+            env['wsgi.input'] = StringIO(data)
+            env[env_key] = str(len(data))
+
+    def _translate_form(self, env, boundary):
+        attributes = dict()
+
+        for fp in _iter_requests(env['wsgi.input'], boundary):
+            hdrs = rfc822.Message(fp, 0)
+            disp, attrs = _parse_attrs(hdrs.getheader('Content-Disposition', ''))
+            if disp != 'form-data':
+                continue
+
+            data = ''
+            while True:
+                chunk = fp.read(READ_CHUNK_SIZE)
+                if not chunk:
+                    break
+                data += chunk
+
+            if 'name' in attrs:
+                attributes[attrs['name'].lower()] = data
+
+        return attributes
 
     def handle_request(self, req):
         self.logger.debug('Calling Swift3 Middleware')

@@ -65,7 +65,10 @@ class Request(swob.Request):
         self.bucket_in_host = self._parse_host()
         self.container_name, self.object_name = self._parse_uri()
         self._validate_headers()
-        self.token = base64.urlsafe_b64encode(self._canonical_string())
+        if env['REQUEST_METHOD'] == 'PUT' and 'POLICY' in env:
+            self.token = base64.urlsafe_b64encode(env['POLICY'])
+        else:
+            self.token = base64.urlsafe_b64encode(self._canonical_string())
         self.user_id = None
 
         # Avoids that swift.swob.Response replaces Location header value
