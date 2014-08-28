@@ -193,10 +193,10 @@ class Request(swob.Request):
                 raise InvalidArgument('x-amz-metadata-directive', value,
                                       err_msg)
 
-        if 'x-amz-storage-class' in self.headers:
-            # Only STANDARD is supported now.
-            if self.headers['x-amz-storage-class'] != 'STANDARD':
-                raise InvalidStorageClass()
+        # if 'x-amz-storage-class' in self.headers:
+        #     # Only STANDARD is supported now.
+        #     if self.headers['x-amz-storage-class'] != 'STANDARD':
+        #         raise InvalidStorageClass()
 
         if 'x-amz-mfa' in self.headers:
             raise S3NotImplemented('MFA Delete is not supported.')
