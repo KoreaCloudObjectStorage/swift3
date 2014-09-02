@@ -49,6 +49,9 @@ class MultiObjectDeleteController(Controller):
         elem = Element('DeleteResult')
 
         xml = req.xml(MAX_MULTI_DELETE_BODY_SIZE)
+
+        req.headers['Content-Length'] = 0
+
         for key, version in object_key_iter(xml):
             if version is not None:
                 # TODO: delete the specific version of the object
