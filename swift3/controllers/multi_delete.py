@@ -50,6 +50,10 @@ class MultiObjectDeleteController(Controller):
 
         xml = req.xml(MAX_MULTI_DELETE_BODY_SIZE)
 
+        quiet = fromstring(xml, 'Delete').find('Quiet')
+        if quiet is not None:
+            quiet = quiet.text.lower()
+
         req.headers['Content-Length'] = 0
 
         for key, version in object_key_iter(xml):
@@ -68,6 +72,9 @@ class MultiObjectDeleteController(Controller):
                 SubElement(error, 'Key').text = key
                 SubElement(error, 'Code').text = e.__class__.__name__
                 SubElement(error, 'Message').text = e._msg
+                continue
+
+            if quiet == 'true':
                 continue
 
             deleted = SubElement(elem, 'Deleted')
