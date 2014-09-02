@@ -88,10 +88,12 @@ class BucketController(Controller):
             is_truncated = 'false'
         SubElement(elem, 'IsTruncated').text = is_truncated
 
+        next_marker = ''
         for o in objects[:max_keys]:
             if 'name' not in o:
                 continue
 
+            next_marker = o['name']
             path = resp.request.path_info + '/' + o['name']
             oreq = make_pre_authed_request(req.environ, method='HEAD',
                                            path=path)
@@ -100,6 +102,9 @@ class BucketController(Controller):
                 o['class'] = 'GLACIER'
             else:
                 o['class'] = 'STANDARD'
+
+        if 'delimiter' in req.params and is_truncated == 'true':
+            SubElement(elem, 'NextMarker').text = next_marker
 
         for o in objects[:max_keys]:
             if 'subdir' not in o:
