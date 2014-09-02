@@ -89,6 +89,9 @@ class BucketController(Controller):
         SubElement(elem, 'IsTruncated').text = is_truncated
 
         for o in objects[:max_keys]:
+            if 'name' not in o:
+                continue
+
             path = resp.request.path_info + '/' + o['name']
             oreq = make_pre_authed_request(req.environ, method='HEAD',
                                            path=path)
