@@ -249,6 +249,10 @@ class Request(swob.Request):
                                 self.headers.get('Content-MD5', ''),
                                 self.headers.get('Content-Type') or '')
 
+        for amz_header in sorted((key.lower() for key in self.params
+                                  if key.lower().startswith('x-amz-'))):
+            amz_headers[amz_header] = self.params[amz_header]
+
         for amz_header in sorted((key.lower() for key in self.headers
                                   if key.lower().startswith('x-amz-'))):
             amz_headers[amz_header] = self.headers[amz_header]
