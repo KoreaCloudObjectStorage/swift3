@@ -388,6 +388,7 @@ class Request(swob.Request):
                 'PUT': [
                     HTTP_CREATED,
                     HTTP_OK,
+                    HTTP_ACCEPTED,
                 ],
                 'POST': [
                     HTTP_NO_CONTENT,
@@ -444,7 +445,6 @@ class Request(swob.Request):
                     HTTP_NOT_FOUND: (NoSuchBucket, self.container_name),
                 },
                 'PUT': {
-                    HTTP_ACCEPTED: (BucketAlreadyExists, self.container_name),
                 },
                 'POST': {
                     HTTP_NOT_FOUND: (NoSuchBucket, self.container_name),
