@@ -167,7 +167,8 @@ class BucketController(Controller):
                 raise InvalidLocationConstraint()
 
         resp = req.get_response(self.app)
-        resp.status = HTTP_OK
+        if resp.status_int // 100 == 2:
+            resp.status = HTTP_OK
         resp.location = '/' + req.container_name
 
         return resp
