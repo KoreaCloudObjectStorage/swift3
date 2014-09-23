@@ -507,10 +507,10 @@ class Request(swob.Request):
         success_codes = self._swift_success_codes(method)
         error_codes = self._swift_error_codes(method)
 
-        if status in success_codes:
+        if 'X-Lifecycle-Response' in resp.headers:
             return resp
 
-        if 'X-Lifecycle-Response' in resp.headers:
+        if status in success_codes:
             return resp
 
         err_msg = resp.body
