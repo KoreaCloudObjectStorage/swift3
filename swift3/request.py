@@ -17,6 +17,7 @@ from urllib import quote
 import base64
 import email.utils
 import datetime
+import re
 
 from swift.common import swob
 from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
@@ -52,6 +53,35 @@ ALLOWED_SUB_RESOURCES = sorted([
     'response-content-encoding', 'response-content-language',
     'response-content-type', 'response-expires', 'cors', 'tagging', 'restore'
 ])
+
+
+def validate_bucket_name(name):
+    """
+    Validates the name of the bucket against S3 criteria,
+    http://docs.amazonwebservices.com/AmazonS3/latest/BucketRestrictions.html
+    True if valid, False otherwise
+    """
+
+    if name.endswith('_segments'):
+        return True
+
+    if '_' in name or len(name) < 3 or len(name) > 63 or not \
+        name[-1].isalnum():
+        # Bucket names should not contain underscores (_)
+        # Bucket names must end with a lowercase letter or number
+        # Bucket names should be between 3 and 63 characters long
+        return False
+    elif '.-' in name or '-.' in name or '..' in name or not name[0].isalnum():
+        # Bucket names cannot contain dashes next to periods
+        # Bucket names cannot contain two adjacent periods
+        # Bucket names Must start with a lowercase letter or a number
+        return False
+    elif re.match("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}"
+                  "([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$", name):
+        # Bucket names cannot be formatted as an IP Address
+        return False
+    else:
+        return True
 
 
 class Request(swob.Request):
@@ -103,10 +133,16 @@ class Request(swob.Request):
             raise InvalidURI(self.path)
 
         if self.bucket_in_host:
+            if not validate_bucket_name(self.bucket_in_host):
+                raise InvalidURI(self.path)
+
             obj = self.environ['PATH_INFO'][1:] or None
             return self.bucket_in_host, obj
 
-        return self.split_path(0, 2, True)
+        bucket, obj = self.split_path(0, 2, True)
+        if bucket and not validate_bucket_name(bucket):
+            raise InvalidURI(self.path)
+        return bucket, obj
 
     def _parse_authorization(self):
         if 'AWSAccessKeyId' in self.params:
@@ -490,6 +526,11 @@ class Request(swob.Request):
         method = method or self.environ['REQUEST_METHOD']
         query = query or self.params
         sw_req = self.to_swift_req(method=method, query=query)
+
+        if self.container_name.endswith('_segments') and \
+           method not in ('GET', 'HEAD'):
+            raise InvalidURI(self.path)
+
         sw_resp = sw_req.get_response(app)
         resp = Response.from_swift_resp(sw_resp)
         status = resp.status_int  # pylint: disable-msg=E1101
