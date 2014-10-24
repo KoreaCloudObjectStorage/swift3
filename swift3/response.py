@@ -101,6 +101,8 @@ class Response(ResponseBase, swob.Response):
                 headers['x-rgw-bytes-used'] = val
             elif _key == 'x-lifecycle-response':
                 headers['x-lifecycle-response'] = val
+            elif _key == 'x-amz-expiration':
+                headers['x-amz-expiration'] = val
 
         self.headers = headers
 
