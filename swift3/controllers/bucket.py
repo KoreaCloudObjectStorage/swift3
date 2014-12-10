@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from simplejson import loads
+from copy import copy
 
 from swift.common.http import HTTP_OK
 from swift.common.utils import get_logger
@@ -23,7 +24,7 @@ from swift3.controllers.base import Controller
 from swift3.controllers.acl import add_canonical_user, swift_acl_translate
 from swift3.etree import Element, SubElement, tostring, fromstring
 from swift3.response import HTTPOk, S3NotImplemented, InvalidArgument, \
-    MalformedXML, InvalidLocationConstraint
+    MalformedXML, InvalidLocationConstraint, NoSuchBucket
 from swift3.cfg import CONF
 
 MAX_PUT_BUCKET_BODY_SIZE = 10240
@@ -177,6 +178,16 @@ class BucketController(Controller):
         """
         Handle DELETE Bucket request
         """
+        head_req = copy(req)
+        container = head_req.container_name
+        head_req.container_name = container + '_segments'
+        try:
+            resp = head_req.get_response(self.app, 'HEAD')
+            resp = head_req.get_response(self.app, 'DELETE')
+        except NoSuchBucket as e:
+            # If _segments bucket is not exist, exception will be occurence.
+            pass
+
         return req.get_response(self.app)
 
     def POST(self, req):
