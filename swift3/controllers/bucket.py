@@ -178,6 +178,10 @@ class BucketController(Controller):
         """
         Handle DELETE Bucket request
         """
+
+        if req.params:
+            return req.get_response(self.app)
+
         head_req = copy(req)
         container = head_req.container_name
         head_req.container_name = container + '_segments'
@@ -187,6 +191,9 @@ class BucketController(Controller):
         except NoSuchBucket as e:
             # If _segments bucket is not exist, exception will be occurence.
             pass
+
+        head_req.container_name = container
+        head_req.get_response(self.app, 'DELETE', query={'lifecycle': ''})
 
         return req.get_response(self.app)
 
