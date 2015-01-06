@@ -26,7 +26,7 @@ from swift3.response import HTTPOk, S3NotImplemented, InvalidArgument, \
     MalformedXML, InvalidLocationConstraint
 from swift3.cfg import CONF
 
-MAX_PUT_BUCKET_BODY_SIZE = 10240
+MAX_PUT_BUCKET_BODY_SIZE = 4194304  # 4MB
 
 LOGGER = get_logger(CONF, log_route='swift3')
 
@@ -177,6 +177,11 @@ class BucketController(Controller):
         """
         Handle DELETE Bucket request
         """
+
+        # Before delete bucket, checking '_segments' bucket and if it exist,
+        # delete it
+        req.container_name = req.container_name + "_segments"
+
         return req.get_response(self.app)
 
     def POST(self, req):
