@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from simplejson import loads
+from copy import copy
 
 from swift.common.http import HTTP_OK
 from swift.common.utils import get_logger
@@ -23,7 +24,7 @@ from swift3.controllers.base import Controller
 from swift3.controllers.acl import add_canonical_user, swift_acl_translate
 from swift3.etree import Element, SubElement, tostring, fromstring
 from swift3.response import HTTPOk, S3NotImplemented, InvalidArgument, \
-    MalformedXML, InvalidLocationConstraint
+    MalformedXML, InvalidLocationConstraint, NoSuchBucket
 from swift3.cfg import CONF
 
 MAX_PUT_BUCKET_BODY_SIZE = 4194304  # 4MB
@@ -177,10 +178,22 @@ class BucketController(Controller):
         """
         Handle DELETE Bucket request
         """
+        if req.params:
+            return req.get_response(self.app)
 
-        # Before delete bucket, checking '_segments' bucket and if it exist,
-        # delete it
-        req.container_name = req.container_name + "_segments"
+        head_req = copy(req)
+        container = head_req.container_name
+        head_req.container_name = container + '_segments'
+        try:
+            resp = head_req.get_response(self.app, 'HEAD')
+            sw_req = head_req.to_swift_req(method='DELETE')
+            resp = sw_req.get_response(self.app)
+        except NoSuchBucket as e:
+            # If _segments bucket is not exist, exception will be occurence.
+            pass
+
+        head_req.container_name = container
+        head_req.get_response(self.app, 'DELETE', query={'lifecycle': ''})
 
         return req.get_response(self.app)
 

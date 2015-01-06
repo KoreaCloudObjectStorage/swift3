@@ -100,6 +100,13 @@ class Swift3Middleware(object):
 
                 req = Request(env)
 
+                if req.is_service_request:
+                    env['swift.source'] = 'account'
+                elif req.is_bucket_request:
+                    env['swift.source'] = 'container'
+                elif req.is_object_request:
+                    env['swift.source'] = 'object'
+
                 resp = self.handle_request(req)
         except NotS3Request:
             resp = self.app
