@@ -27,7 +27,7 @@ from swift3.response import HTTPOk, S3NotImplemented, InvalidArgument, \
     MalformedXML, InvalidLocationConstraint, NoSuchBucket
 from swift3.cfg import CONF
 
-MAX_PUT_BUCKET_BODY_SIZE = 10240
+MAX_PUT_BUCKET_BODY_SIZE = 4194304  # 4MB
 
 LOGGER = get_logger(CONF, log_route='swift3')
 
@@ -178,7 +178,6 @@ class BucketController(Controller):
         """
         Handle DELETE Bucket request
         """
-
         if req.params:
             return req.get_response(self.app)
 
