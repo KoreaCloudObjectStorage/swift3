@@ -56,9 +56,8 @@ import rfc822
 
 from cStringIO import StringIO
 
-from swift.common.utils import get_logger
-from swift.common.middleware.formpost import _parse_attrs
-from swift.common.middleware.formpost import _iter_requests
+from swift.common.utils import get_logger, iter_multipart_mime_documents, \
+    parse_content_disposition
 
 from swift3.exception import NotS3Request
 from swift3.request import Request
@@ -182,7 +181,8 @@ class Swift3Middleware(object):
         if env.get('REQUEST_METHOD') != 'POST':
             return
 
-        content_type, attrs = _parse_attrs(env.get('CONTENT_TYPE') or '')
+        content_type, attrs = \
+            parse_content_disposition(env.get('CONTENT_TYPE') or '')
         if content_type != 'multipart/form-data' or 'boundary' not in attrs:
             return
 
@@ -214,9 +214,11 @@ class Swift3Middleware(object):
     def _translate_form(self, env, boundary):
         attributes = dict()
 
-        for fp in _iter_requests(env['wsgi.input'], boundary):
+        for fp in iter_multipart_mime_documents(env['wsgi.input'], boundary):
             hdrs = rfc822.Message(fp, 0)
-            disp, attrs = _parse_attrs(hdrs.getheader('Content-Disposition', ''))
+            disp, attrs = \
+                parse_content_disposition(hdrs.getheader('Content-Disposition',
+                                                         ''))
             if disp != 'form-data':
                 continue
 
