@@ -13,19 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+import md5
 from urllib import quote
 import base64
 import email.utils
 import datetime
 import re
 
+from swift.common.utils import split_path
 from swift.common import swob
 from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
     HTTP_NO_CONTENT, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, \
     HTTP_CONFLICT, HTTP_UNPROCESSABLE_ENTITY, HTTP_REQUEST_ENTITY_TOO_LARGE, \
     HTTP_PARTIAL_CONTENT, HTTP_NOT_MODIFIED, HTTP_PRECONDITION_FAILED, \
     HTTP_REQUESTED_RANGE_NOT_SATISFIABLE, HTTP_LENGTH_REQUIRED, \
-    HTTP_BAD_REQUEST, HTTP_SERVICE_UNAVAILABLE
+    HTTP_BAD_REQUEST, HTTP_REQUEST_TIMEOUT
 
 from swift.common.constraints import check_utf8
 
@@ -33,15 +36,19 @@ from swift3.controllers import ServiceController, BucketController, \
     ObjectController, AclController, MultiObjectDeleteController, \
     LocationController, LoggingStatusController, PartController, \
     UploadController, UploadsController, VersioningController, \
-    UnsupportedController
+    UnsupportedController, S3AclController
 from swift3.response import AccessDenied, InvalidArgument, InvalidDigest, \
     RequestTimeTooSkewed, Response, SignatureDoesNotMatch, \
-    ServiceUnavailable, BucketAlreadyExists, BucketNotEmpty, EntityTooLarge, \
+    BucketAlreadyExists, BucketNotEmpty, EntityTooLarge, \
     InternalError, NoSuchBucket, NoSuchKey, PreconditionFailed, InvalidRange, \
     MissingContentLength, InvalidStorageClass, S3NotImplemented, InvalidURI, \
-    MalformedXML
+    MalformedXML, InvalidRequest, RequestTimeout, InvalidBucketName
 from swift3.exception import NotS3Request, BadSwiftRequest
+from swift3.utils import utf8encode, LOGGER, check_path_header
 from swift3.cfg import CONF
+from swift3.subresource import decode_acl, encode_acl
+from swift3.utils import sysmeta_header, validate_bucket_name
+from swift3.acl_handlers import get_acl_handler
 
 # List of sub-resources that must be maintained as part of the HMAC
 # signature string.
@@ -55,40 +62,34 @@ ALLOWED_SUB_RESOURCES = sorted([
 ])
 
 
-def validate_bucket_name(name):
-    """
-    Validates the name of the bucket against S3 criteria,
-    http://docs.amazonwebservices.com/AmazonS3/latest/BucketRestrictions.html
-    True if valid, False otherwise
-    """
 
-    if name.endswith('_segments'):
-        return True
+def _header_acl_property(resource):
+    """
+    Set and retrieve the acl in self.headers
+    """
+    def getter(self):
+        return getattr(self, '_%s' % resource)
 
-    if '_' in name or len(name) < 3 or len(name) > 63 or not \
-        name[-1].isalnum():
-        # Bucket names should not contain underscores (_)
-        # Bucket names must end with a lowercase letter or number
-        # Bucket names should be between 3 and 63 characters long
-        return False
-    elif '.-' in name or '-.' in name or '..' in name or not name[0].isalnum():
-        # Bucket names cannot contain dashes next to periods
-        # Bucket names cannot contain two adjacent periods
-        # Bucket names Must start with a lowercase letter or a number
-        return False
-    elif re.match("^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}"
-                  "([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$", name):
-        # Bucket names cannot be formatted as an IP Address
-        return False
-    else:
-        return True
+    def setter(self, value):
+        self.headers.update(encode_acl(resource, value))
+        setattr(self, '_%s' % resource, value)
+
+    def deleter(self):
+        self.headers[sysmeta_header(resource, 'acl')] = ''
+
+    return property(getter, setter, deleter,
+                    doc='Get and set the %s acl property' % resource)
 
 
 class Request(swob.Request):
     """
     S3 request object.
     """
-    def __init__(self, env):
+
+    bucket_acl = _header_acl_property('container')
+    object_acl = _header_acl_property('object')
+
+    def __init__(self, env, slo_enabled=True):
         swob.Request.__init__(self, env)
 
         self.access_key, self.signature = self._parse_authorization()
@@ -99,14 +100,16 @@ class Request(swob.Request):
             self.token = base64.urlsafe_b64encode(env['POLICY'])
         else:
             self.token = base64.urlsafe_b64encode(self._canonical_string())
+        self.account = None
         self.user_id = None
+        self.slo_enabled = slo_enabled
 
         # Avoids that swift.swob.Response replaces Location header value
         # by full URL when absolute path given. See swift.swob for more detail.
         self.environ['swift.leave_relative_location'] = True
 
     def _parse_host(self):
-        storage_domain = CONF['storage_domain']
+        storage_domain = CONF.storage_domain
         if not storage_domain:
             return None
 
@@ -140,9 +143,11 @@ class Request(swob.Request):
             return self.bucket_in_host, obj
 
         bucket, obj = self.split_path(0, 2, True)
+
         if bucket and not validate_bucket_name(bucket):
-            raise InvalidURI(self.path)
-        return bucket, obj
+            # Ignore GET service case
+            raise InvalidBucketName(bucket)
+        return (bucket, obj)
 
     def _parse_authorization(self):
         if 'AWSAccessKeyId' in self.params:
@@ -154,7 +159,7 @@ class Request(swob.Request):
                 raise AccessDenied()
 
         if 'Authorization' not in self.headers:
-            raise NotS3Request
+            raise NotS3Request()
 
         try:
             keyword, info = self.headers['Authorization'].split(' ', 1)
@@ -162,7 +167,7 @@ class Request(swob.Request):
             raise AccessDenied()
 
         if keyword != 'AWS':
-            raise NotS3Request
+            raise NotS3Request()
 
         try:
             access_key, signature = info.rsplit(':', 1)
@@ -215,12 +220,23 @@ class Request(swob.Request):
 
         if 'Content-MD5' in self.headers:
             value = self.headers['Content-MD5']
-            if value == '':
-                raise InvalidDigest()
+            if not re.match('^[A-Za-z0-9+/]+={0,2}$', value):
+                # Non-base64-alphabet characters in value.
+                raise InvalidDigest(content_md5=value)
             try:
                 self.headers['ETag'] = value.decode('base64').encode('hex')
             except Exception:
-                raise InvalidDigest()
+                raise InvalidDigest(content_md5=value)
+
+        if 'X-Amz-Copy-Source' in self.headers:
+            try:
+                check_path_header(self, 'X-Amz-Copy-Source', 2, '')
+            except swob.HTTPException:
+                msg = 'Copy Source must mention the source bucket and key: ' \
+                      'sourcebucket/sourcekey'
+                raise InvalidArgument('x-amz-copy-source',
+                                      self.headers['X-Amz-Copy-Source'],
+                                      msg)
 
         if 'x-amz-metadata-directive' in self.headers:
             value = self.headers['x-amz-metadata-directive']
@@ -252,7 +268,7 @@ class Request(swob.Request):
         """
         raise AttributeError("No attribute 'body'")
 
-    def xml(self, max_length):
+    def xml(self, max_length, check_md5=False):
         """
         Similar to swob.Request.body, but it checks the content length before
         creating a body string.
@@ -267,7 +283,44 @@ class Request(swob.Request):
         if self.message_length() > max_length:
             raise MalformedXML()
 
-        return swob.Request.body.fget(self)
+        body = swob.Request.body.fget(self)
+
+        if check_md5:
+            self.check_md5(body)
+
+        return body
+
+    def check_md5(self, body):
+        if 'HTTP_CONTENT_MD5' not in self.environ:
+            raise InvalidRequest('Missing required header for this request: '
+                                 'Content-MD5')
+
+        digest = md5.new(body).digest().encode('base64').strip()
+        if self.environ['HTTP_CONTENT_MD5'] != digest:
+            raise InvalidDigest(content_md5=self.environ['HTTP_CONTENT_MD5'])
+
+    def _copy_source_headers(self):
+        env = {}
+        for key, value in self.environ.items():
+            if key.startswith('HTTP_X_AMZ_COPY_SOURCE_'):
+                env[key.replace('X_AMZ_COPY_SOURCE_', '')] = value
+
+        return swob.HeaderEnvironProxy(env)
+
+    def check_copy_source(self, app):
+        if 'X-Amz-Copy-Source' in self.headers:
+            src_path = self.headers['X-Amz-Copy-Source']
+            src_path = src_path if src_path.startswith('/') else \
+                ('/' + src_path)
+            src_bucket, src_obj = split_path(src_path, 0, 2, True)
+            headers = swob.HeaderKeyDict()
+            headers.update(self._copy_source_headers())
+
+            src_resp = self.get_response(app, 'HEAD', src_bucket, src_obj,
+                                         headers=headers)
+
+            if src_resp.status_int == 304:  # pylint: disable-msg=E1101
+                raise PreconditionFailed()
 
     def _canonical_uri(self):
         raw_path_info = self.environ.get('RAW_PATH_INFO', self.path)
@@ -316,9 +369,19 @@ class Request(swob.Request):
         return buf + path
 
     @property
+    def controller_name(self):
+        return self.controller.__name__[:-len('Controller')]
+
+    @property
     def controller(self):
         if self.is_service_request:
             return ServiceController
+
+        if not self.slo_enabled:
+            multi_part = ['partNumber', 'uploadId', 'uploads']
+            if len([p for p in multi_part if p in self.params]):
+                LOGGER.warning('multipart: No SLO middleware in pipeline')
+                raise S3NotImplemented("Multi-part feature isn't support")
 
         if 'acl' in self.params:
             return AclController
@@ -358,10 +421,16 @@ class Request(swob.Request):
     def is_object_request(self):
         return self.container_name and self.object_name
 
-    def to_swift_req(self, method, query=None):
+    def to_swift_req(self, method, container, obj, query=None,
+                     body=None, headers=None):
         """
         Create a Swift request based on this request's environment.
         """
+        if self.account is None:
+            account = self.access_key
+        else:
+            account = self.account
+
         env = self.environ.copy()
 
         for key in env:
@@ -369,22 +438,23 @@ class Request(swob.Request):
                 env['HTTP_X_OBJECT_META_' + key[16:]] = env[key]
                 del env[key]
 
-            if key == 'HTTP_X_AMZ_COPY_SOURCE':
-                env['HTTP_X_COPY_FROM'] = env[key]
-                del env[key]
+        if 'HTTP_X_AMZ_COPY_SOURCE' in env:
+            env['HTTP_X_COPY_FROM'] = env['HTTP_X_AMZ_COPY_SOURCE']
+            del env['HTTP_X_AMZ_COPY_SOURCE']
+            env['CONTENT_LENGTH'] = '0'
 
         env['swift.source'] = 'S3'
         if method is not None:
             env['REQUEST_METHOD'] = method
+
         env['HTTP_X_AUTH_TOKEN'] = self.token
 
-        if self.is_object_request:
-            path = '/v1/%s/%s/%s' % (self.access_key, self.container_name,
-                                     self.object_name)
-        elif self.is_bucket_request:
-            path = '/v1/%s/%s' % (self.access_key, self.container_name)
+        if obj:
+            path = '/v1/%s/%s/%s' % (account, container, obj)
+        elif container:
+            path = '/v1/%s/%s' % (account, container)
         else:
-            path = '/v1/%s' % (self.access_key)
+            path = '/v1/%s' % (account)
         env['PATH_INFO'] = path
 
         query_string = ''
@@ -398,20 +468,21 @@ class Request(swob.Request):
             query_string = '&'.join(params)
         env['QUERY_STRING'] = query_string
 
-        return swob.Request.blank(quote(path), environ=env)
+        return swob.Request.blank(quote(path), environ=env, body=body,
+                                  headers=headers)
 
-    def _swift_success_codes(self, method):
+    def _swift_success_codes(self, method, container, obj):
         """
         Returns a list of expected success codes from Swift.
         """
-        if self.is_service_request:
+        if not container:
             # Swift account access.
             code_map = {
                 'GET': [
                     HTTP_OK,
                 ],
             }
-        elif self.is_bucket_request:
+        elif not obj:
             # Swift container access.
             code_map = {
                 'HEAD': [
@@ -460,33 +531,34 @@ class Request(swob.Request):
 
         return code_map[method]
 
-    def _swift_error_codes(self, method):
+    def _swift_error_codes(self, method, container, obj):
         """
         Returns a dict from expected Swift error codes to the corresponding S3
         error responses.
         """
-        if self.is_service_request:
+        if not container:
             # Swift account access.
             code_map = {
                 'GET': {
                 },
             }
-        elif self.is_bucket_request:
+        elif not obj:
             # Swift container access.
             code_map = {
                 'HEAD': {
-                    HTTP_NOT_FOUND: (NoSuchBucket, self.container_name),
+                    HTTP_NOT_FOUND: (NoSuchBucket, container),
                 },
                 'GET': {
-                    HTTP_NOT_FOUND: (NoSuchBucket, self.container_name),
+                    HTTP_NOT_FOUND: (NoSuchBucket, container),
                 },
                 'PUT': {
+                    HTTP_ACCEPTED: (BucketAlreadyExists, container),
                 },
                 'POST': {
-                    HTTP_NOT_FOUND: (NoSuchBucket, self.container_name),
+                    HTTP_NOT_FOUND: (NoSuchBucket, container),
                 },
                 'DELETE': {
-                    HTTP_NOT_FOUND: (NoSuchBucket, self.container_name),
+                    HTTP_NOT_FOUND: (NoSuchBucket, container),
                     HTTP_CONFLICT: BucketNotEmpty,
                 },
             }
@@ -494,38 +566,52 @@ class Request(swob.Request):
             # Swift object access.
             code_map = {
                 'HEAD': {
-                    HTTP_NOT_FOUND: (NoSuchKey, self.object_name),
+                    HTTP_NOT_FOUND: (NoSuchKey, obj),
                     HTTP_PRECONDITION_FAILED: PreconditionFailed,
                 },
                 'GET': {
-                    HTTP_NOT_FOUND: (NoSuchKey, self.object_name),
+                    HTTP_NOT_FOUND: (NoSuchKey, obj),
                     HTTP_PRECONDITION_FAILED: PreconditionFailed,
                     HTTP_REQUESTED_RANGE_NOT_SATISFIABLE: InvalidRange,
                 },
                 'PUT': {
-                    HTTP_NOT_FOUND: (NoSuchBucket, self.container_name),
+                    HTTP_NOT_FOUND: (NoSuchBucket, container),
                     HTTP_UNPROCESSABLE_ENTITY: InvalidDigest,
                     HTTP_REQUEST_ENTITY_TOO_LARGE: EntityTooLarge,
                     HTTP_LENGTH_REQUIRED: MissingContentLength,
+                    HTTP_REQUEST_TIMEOUT: RequestTimeout,
+                },
+                'POST': {
+                    HTTP_NOT_FOUND: (NoSuchKey, obj),
+                    HTTP_PRECONDITION_FAILED: PreconditionFailed,
                 },
                 'POST': {
                     HTTP_BAD_REQUEST: (InvalidURI, self.path_info),
                 },
                 'DELETE': {
-                    HTTP_NOT_FOUND: (NoSuchKey, self.object_name),
+                    HTTP_NOT_FOUND: (NoSuchKey, obj),
                 },
             }
 
         return code_map[method]
 
-    def get_response(self, app, method=None, query=None):
+    def _get_response(self, app, method, container, obj,
+                      headers=None, body=None, query=None):
         """
         Calls the application with this request's environment.  Returns a
         Response object that wraps up the application's result.
         """
+
         method = method or self.environ['REQUEST_METHOD']
         query = query or self.params
-        sw_req = self.to_swift_req(method=method, query=query)
+
+        if container is None:
+            container = self.container_name
+        if obj is None:
+            obj = self.object_name
+
+        sw_req = self.to_swift_req(method, container, obj, headers=headers,
+                                   body=body, query=query)
 
         if self.container_name.endswith('_segments') and \
            method not in ('GET', 'HEAD'):
@@ -535,18 +621,19 @@ class Request(swob.Request):
         resp = Response.from_swift_resp(sw_resp)
         status = resp.status_int  # pylint: disable-msg=E1101
 
-        if 'HTTP_X_USER_NAME' in sw_resp.environ:
-            # keystone
-            self.user_id = "%s:%s" % (sw_resp.environ['HTTP_X_TENANT_NAME'],
-                                      sw_resp.environ['HTTP_X_USER_NAME'])
-            if isinstance(self.user_id, unicode):
-                self.user_id = self.user_id.encode('utf8')
-        else:
-            # tempauth
-            self.user_id = self.access_key
+        if not self.user_id:
+            if 'HTTP_X_USER_NAME' in sw_resp.environ:
+                # keystone
+                self.user_id = \
+                    utf8encode("%s:%s" %
+                               (sw_resp.environ['HTTP_X_TENANT_NAME'],
+                                sw_resp.environ['HTTP_X_USER_NAME']))
+            else:
+                # tempauth
+                self.user_id = self.access_key
 
-        success_codes = self._swift_success_codes(method)
-        error_codes = self._swift_error_codes(method)
+        success_codes = self._swift_success_codes(method, container, obj)
+        error_codes = self._swift_error_codes(method, container, obj)
 
         if 'X-Lifecycle-Response' in resp.headers:
             return resp
@@ -557,7 +644,8 @@ class Request(swob.Request):
         err_msg = resp.body
 
         if status in error_codes:
-            err_resp = error_codes[sw_resp.status_int]
+            err_resp = \
+                error_codes[sw_resp.status_int]  # pylint: disable-msg=E1101
             if isinstance(err_resp, tuple):
                 raise err_resp[0](*err_resp[1:])
             else:
@@ -569,7 +657,126 @@ class Request(swob.Request):
             raise SignatureDoesNotMatch()
         if status == HTTP_FORBIDDEN:
             raise AccessDenied()
-        if status == HTTP_SERVICE_UNAVAILABLE:
-            raise ServiceUnavailable()
 
         raise InternalError('unexpected status code %d' % status)
+
+    def get_response(self, app, method=None, container=None, obj=None,
+                     headers=None, body=None, query=None):
+        """
+        get_response is an entry point to be extended for chiled classes.
+        If additional tasks needed at that time of getting swift response,
+        we can override this method. swift3.request.Request need to just call
+        _get_response to get pure swift response.
+        """
+        return self._get_response(app, method, container, obj,
+                                  headers, body, query)
+
+    def get_validated_param(self, param, default, limit=None):
+        value = default
+        if param in self.params:
+            try:
+                value = int(self.params[param])
+                if value < 0 or (limit is not None and limit < value):
+                    err_msg = 'Argument %s must be an integer between 0 and' \
+                              ' %d' % (param, limit)
+                    raise InvalidArgument(param,
+                                          self.params[param],
+                                          err_msg)
+                if not isinstance(value, int):
+                    # check the instance because int() could build
+                    # a long instance
+                    raise ValueError()
+            except ValueError:
+                err_msg = 'Provided %s not an integer or within ' \
+                          'integer range' % param
+                raise InvalidArgument(param, self.params[param],
+                                      err_msg)
+        return value
+
+
+class S3AclRequest(Request):
+    """
+    S3Acl request object.
+    """
+    def __init__(self, env, app, slo_enabled=True):
+        super(S3AclRequest, self).__init__(env, slo_enabled)
+        self.authenticate(app)
+
+    @property
+    def controller(self):
+        if 'acl' in self.params and not self.is_service_request:
+            return S3AclController
+        return super(S3AclRequest, self).controller
+
+    def authenticate(self, app):
+        """
+        authenticate method will run pre-authenticate request and retrieve
+        account information.
+        Note that it currently supports only keystone and tempauth.
+        (no support for the third party authentication middleware)
+        """
+        sw_req = self.to_swift_req('TEST', None, None, body='')
+        # don't show log message of this request
+        sw_req.environ['swift.proxy_access_log_made'] = True
+
+        sw_resp = sw_req.get_response(app)
+
+        if not sw_req.remote_user:
+            raise SignatureDoesNotMatch()
+
+        _, self.account, _ = split_path(sw_resp.environ['PATH_INFO'],
+                                        2, 3, True)
+        self.account = utf8encode(self.account)
+
+        if 'HTTP_X_USER_NAME' in sw_resp.environ:
+            # keystone
+            self.user_id = "%s:%s" % (sw_resp.environ['HTTP_X_TENANT_NAME'],
+                                      sw_resp.environ['HTTP_X_USER_NAME'])
+            self.user_id = utf8encode(self.user_id)
+            self.token = sw_req.environ['HTTP_X_AUTH_TOKEN']
+            # Need to skip S3 authorization since authtoken middleware
+            # overwrites account in PATH_INFO
+            del self.headers['Authorization']
+        else:
+            # tempauth
+            self.user_id = self.access_key
+
+    def to_swift_req(self, method, container, obj, query=None,
+                     body=None, headers=None):
+        sw_req = super(S3AclRequest, self).to_swift_req(
+            method, container, obj, query, body, headers)
+        if self.account:
+            sw_req.environ['swift_owner'] = True  # needed to set ACL
+            sw_req.environ['swift.authorize_override'] = True
+            sw_req.environ['swift.authorize'] = lambda req: None
+        return sw_req
+
+    def get_acl_response(self, app, method=None, container=None, obj=None,
+                         headers=None, body=None, query=None):
+        """
+        Wrapper method of _get_response to add s3 acl information
+        from response sysmeta headers.
+        """
+
+        resp = self._get_response(
+            app, method, container, obj, headers, body, query)
+
+        resp.bucket_acl = decode_acl('container', resp.sysmeta_headers)
+        resp.object_acl = decode_acl('object', resp.sysmeta_headers)
+        return resp
+
+    def get_response(self, app, method=None, container=None, obj=None,
+                     headers=None, body=None, query=None):
+        """
+        Wrap up get_response call to hook with acl handling method.
+        """
+        acl_handler = get_acl_handler(self.controller_name)(
+            self, container, obj, headers)
+        resp = acl_handler.handle_acl(app, method)
+
+        # possible to skip recalling get_resposne_acl if resp is not
+        # None (e.g. HEAD)
+        if resp:
+            return resp
+        return self.get_acl_response(app, method, container, obj,
+                                     headers, body, query)

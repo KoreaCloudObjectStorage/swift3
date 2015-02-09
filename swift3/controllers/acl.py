@@ -16,24 +16,17 @@
 from swift.common.http import HTTP_OK
 from swift.common.middleware.acl import parse_acl, referrer_allowed
 
+from swift3.exception import ACLError
 from swift3.controllers.base import Controller
-from swift3.response import HTTPOk, S3NotImplemented, MalformedACLError
+from swift3.response import HTTPOk, S3NotImplemented, MalformedACLError, \
+    InvalidArgument, UnexpectedContent
 from swift3.etree import Element, SubElement, fromstring, tostring, \
-    DocumentInvalid
+    XMLSyntaxError, DocumentInvalid
+from swift3.cfg import CONF
 
 XMLNS_XSI = 'http://www.w3.org/2001/XMLSchema-instance'
 
 MAX_ACL_BODY_SIZE = 200 * 1024
-
-def add_canonical_user(parent, tag, user, nsmap=None):
-    """
-    Create an element for cannonical user.
-    """
-    elem = SubElement(parent, tag, nsmap=nsmap)
-    SubElement(elem, 'ID').text = user
-    SubElement(elem, 'DisplayName').text = user
-
-    return elem
 
 
 def get_acl(account_name, headers):
@@ -42,14 +35,17 @@ def get_acl(account_name, headers):
     """
 
     elem = Element('AccessControlPolicy')
-    add_canonical_user(elem, 'Owner', account_name)
+    owner = SubElement(elem, 'Owner')
+    SubElement(owner, 'ID').text = account_name
+    SubElement(owner, 'DisplayName').text = account_name
     access_control_list = SubElement(elem, 'AccessControlList')
 
     # grant FULL_CONTROL to myself by default
     grant = SubElement(access_control_list, 'Grant')
-    grantee = add_canonical_user(grant, 'Grantee', account_name,
-                                 nsmap={'xsi': XMLNS_XSI})
+    grantee = SubElement(grant, 'Grantee', nsmap={'xsi': XMLNS_XSI})
     grantee.set('{%s}type' % XMLNS_XSI, 'CanonicalUser')
+    SubElement(grantee, 'ID').text = account_name
+    SubElement(grantee, 'DisplayName').text = account_name
     SubElement(grant, 'Permission').text = 'FULL_CONTROL'
 
     referrers, _ = parse_acl(headers.get('x-container-read'))
@@ -84,24 +80,25 @@ def swift_acl_translate(acl, group='', user='', xml=False):
     that yet.
     """
     swift_acl = {}
-    swift_acl['public-read'] = [['HTTP_X_CONTAINER_READ', '.r:*,.rlistings']]
+    swift_acl['public-read'] = [['X-Container-Read', '.r:*,.rlistings']]
     # Swift does not support public write:
     # https://answers.launchpad.net/swift/+question/169541
-    swift_acl['public-read-write'] = [['HTTP_X_CONTAINER_WRITE', '.r:*'],
-                                      ['HTTP_X_CONTAINER_READ',
+    swift_acl['public-read-write'] = [['X-Container-Write', '.r:*'],
+                                      ['X-Container-Read',
                                        '.r:*,.rlistings']]
 
-    #TODO: if there's a way to get group and user, this should work for
+    # TODO: if there's a way to get group and user, this should work for
     # private:
-    #swift_acl['private'] = [['HTTP_X_CONTAINER_WRITE',  group + ':' + user], \
-    #                  ['HTTP_X_CONTAINER_READ', group + ':' + user]]
-    swift_acl['private'] = [['HTTP_X_CONTAINER_WRITE', '.'],
-                            ['HTTP_X_CONTAINER_READ', '.']]
+    # swift_acl['private'] = \
+    #     [['HTTP_X_CONTAINER_WRITE',  group + ':' + user], \
+    #      ['HTTP_X_CONTAINER_READ', group + ':' + user]]
+    swift_acl['private'] = [['X-Container-Write', '.'],
+                            ['X-Container-Read', '.']]
     if xml:
         # We are working with XML and need to parse it
         try:
             elem = fromstring(acl, 'AccessControlPolicy')
-        except DocumentInvalid:
+        except (XMLSyntaxError, DocumentInvalid):
             raise MalformedACLError()
         acl = 'unknown'
         for grant in elem.findall('./AccessControlList/Grant'):
@@ -119,11 +116,39 @@ def swift_acl_translate(acl, group='', user='', xml=False):
                 acl = 'unsupported'
 
     if acl == 'authenticated-read':
-        return "NotImplemented"
+        raise S3NotImplemented()
     elif acl not in swift_acl:
-        return "InvalidArgument"
+        raise ACLError()
 
     return swift_acl[acl]
+
+
+def handle_acl_header(req):
+    """
+    Handle the x-amz-acl header.
+    """
+    # Used this method, delete 'HTTP_X_AMZ_ACL' from environ, and header for
+    # s3_acl(x-container-sysmeta-swift3-acl) becomes impossible to create.
+    # TODO: Modify to be able to use the s3_acl and swift acl
+    # (e.g. X-Container-Read) at the same time, if s3_acl is effective.
+    if CONF.s3_acl:
+        return
+
+    amz_acl = req.environ['HTTP_X_AMZ_ACL']
+    # Translate the Amazon ACL to something that can be
+    # implemented in Swift, 501 otherwise. Swift uses POST
+    # for ACLs, whereas S3 uses PUT.
+    del req.environ['HTTP_X_AMZ_ACL']
+    if req.query_string:
+        req.query_string = ''
+
+    try:
+        translated_acl = swift_acl_translate(amz_acl)
+    except ACLError:
+        raise InvalidArgument('x-amz-acl', amz_acl)
+
+    for header, acl in translated_acl:
+        req.headers[header] = acl
 
 
 class AclController(Controller):
@@ -154,20 +179,23 @@ class AclController(Controller):
             raise S3NotImplemented()
         else:
             # Handle Bucket ACL
+            xml = req.xml(MAX_ACL_BODY_SIZE)
+            if 'HTTP_X_AMZ_ACL' in req.environ and xml:
+                # S3 doesn't allow to give ACL with both ACL header and body.
+                raise UnexpectedContent()
+            elif 'HTTP_X_AMZ_ACL' in req.environ:
+                handle_acl_header(req)
+            elif xml:
+                # We very likely have an XML-based ACL request.
+                try:
+                    translated_acl = swift_acl_translate(xml, xml=True)
+                except ACLError:
+                    raise MalformedACLError()
 
-            # We very likely have an XML-based ACL request.
-            translated_acl = swift_acl_translate(req.xml(MAX_ACL_BODY_SIZE),
-                                                 xml=True)
-            if translated_acl == 'NotImplemented':
-                raise S3NotImplemented()
-            elif translated_acl == 'InvalidArgument':
-                raise MalformedACLError()
-            for header, acl in translated_acl:
-                req.headers[header] = acl
+                for header, acl in translated_acl:
+                    req.headers[header] = acl
 
-            req.environ['REQUEST_METHOD'] = 'POST'
-
-            resp = req.get_response(self.app)
+            resp = req.get_response(self.app, 'POST')
             resp.status = HTTP_OK
             resp.headers.update({'Location': req.container_name})
 

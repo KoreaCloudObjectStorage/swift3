@@ -13,23 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from simplejson import loads
 from copy import copy
 
-from swift.common.http import HTTP_OK
-from swift.common.utils import get_logger
 from swift.common.wsgi import make_pre_authed_request
+from swift.common.http import HTTP_OK
+from swift.common.utils import json
 
 from swift3.controllers.base import Controller
-from swift3.controllers.acl import add_canonical_user, swift_acl_translate
-from swift3.etree import Element, SubElement, tostring, fromstring
+from swift3.controllers.acl import handle_acl_header
+from swift3.etree import Element, SubElement, tostring, fromstring, \
+    XMLSyntaxError, DocumentInvalid
 from swift3.response import HTTPOk, S3NotImplemented, InvalidArgument, \
     MalformedXML, InvalidLocationConstraint, NoSuchBucket
 from swift3.cfg import CONF
+from swift3.utils import LOGGER
 
 MAX_PUT_BUCKET_BODY_SIZE = 4194304  # 4MB
-
-LOGGER = get_logger(CONF, log_route='swift3')
 
 
 class BucketController(Controller):
@@ -48,12 +47,15 @@ class BucketController(Controller):
         """
         Handle GET Bucket (List Objects) request
         """
-        if 'max-keys' in req.params:
-            if req.params.get('max-keys').isdigit() is False:
-                raise InvalidArgument('max-keys', req.params['max-keys'])
 
-        max_keys = int(req.params.get('max-keys', CONF['max_bucket_listing']))
-        max_keys = min(max_keys, int(CONF['max_bucket_listing']))
+        max_keys = req.get_validated_param('max-keys', CONF.max_bucket_listing)
+        # TODO: Separate max_bucket_listing and default_bucket_listing
+        max_keys = min(max_keys, CONF.max_bucket_listing)
+
+        encoding_type = req.params.get('encoding-type')
+        if encoding_type is not None and encoding_type != 'url':
+            err_msg = 'Invalid Encoding Method specified in Request'
+            raise InvalidArgument('encoding-type', encoding_type, err_msg)
 
         query = {
             'format': 'json',
@@ -75,26 +77,41 @@ class BucketController(Controller):
         if 'X-Lifecycle-Response' in resp.headers:
             return resp
 
-        objects = loads(resp.body)
+        objects = json.loads(resp.body)
 
         elem = Element('ListBucketResult')
         SubElement(elem, 'Name').text = req.container_name
         SubElement(elem, 'Prefix').text = req.params.get('prefix')
         SubElement(elem, 'Marker').text = req.params.get('marker')
-        SubElement(elem, 'MaxKeys').text = str(max_keys)
-        SubElement(elem, 'Delimiter').text = req.params.get('delimiter')
-        if max_keys > 0 and len(objects) == max_keys + 1:
-            is_truncated = 'true'
-        else:
-            is_truncated = 'false'
-        SubElement(elem, 'IsTruncated').text = is_truncated
 
-        next_marker = ''
-        for o in objects[:max_keys]:
+        # in order to judge that truncated is valid, check whether
+        # max_keys + 1 th element exists in swift.
+        is_truncated = max_keys > 0 and len(objects) > max_keys
+        objects = objects[:max_keys]
+
+        if is_truncated and 'delimiter' in req.params:
+            if 'name' in objects[-1]:
+                SubElement(elem, 'NextMarker').text = \
+                    objects[-1]['name']
+            if 'subdir' in objects[-1]:
+                SubElement(elem, 'NextMarker').text = \
+                    objects[-1]['subdir']
+
+        SubElement(elem, 'MaxKeys').text = str(max_keys)
+
+        if 'delimiter' in req.params:
+            SubElement(elem, 'Delimiter').text = req.params['delimiter']
+
+        if encoding_type is not None:
+            SubElement(elem, 'EncodingType').text = encoding_type
+
+        SubElement(elem, 'IsTruncated').text = \
+            'true' if is_truncated else 'false'
+
+        for o in objects:
             if 'name' not in o:
                 continue
 
-            next_marker = o['name']
             path = resp.request.path_info + '/' + o['name']
             oreq = make_pre_authed_request(req.environ, method='HEAD',
                                            path=path)
@@ -104,10 +121,7 @@ class BucketController(Controller):
             else:
                 o['class'] = 'STANDARD'
 
-        if 'delimiter' in req.params and is_truncated == 'true':
-            SubElement(elem, 'NextMarker').text = next_marker
-
-        for o in objects[:max_keys]:
+        for o in objects:
             if 'subdir' not in o:
                 contents = SubElement(elem, 'Contents')
                 SubElement(contents, 'Key').text = o['name']
@@ -115,15 +129,18 @@ class BucketController(Controller):
                     o['last_modified'] + 'Z'
                 SubElement(contents, 'ETag').text = o['hash']
                 SubElement(contents, 'Size').text = str(o['bytes'])
-                add_canonical_user(contents, 'Owner', req.user_id)
                 SubElement(contents, 'StorageClass').text = o['class']
+                owner = SubElement(contents, 'Owner')
+                SubElement(owner, 'ID').text = req.user_id
+                SubElement(owner, 'DisplayName').text = req.user_id
+                SubElement(contents, 'StorageClass').text = 'STANDARD'
 
-        for o in objects[:max_keys]:
+        for o in objects:
             if 'subdir' in o:
                 common_prefixes = SubElement(elem, 'CommonPrefixes')
                 SubElement(common_prefixes, 'Prefix').text = o['subdir']
 
-        body = tostring(elem)
+        body = tostring(elem, encoding_type=encoding_type)
 
         return HTTPOk(body=body, content_type='application/xml')
 
@@ -131,24 +148,6 @@ class BucketController(Controller):
         """
         Handle PUT Bucket request
         """
-        if 'HTTP_X_AMZ_ACL' in req.environ:
-            amz_acl = req.environ['HTTP_X_AMZ_ACL']
-            # Translate the Amazon ACL to something that can be
-            # implemented in Swift, 501 otherwise. Swift uses POST
-            # for ACLs, whereas S3 uses PUT.
-            del req.environ['HTTP_X_AMZ_ACL']
-            if req.query_string:
-                req.query_string = ''
-
-            translated_acl = swift_acl_translate(amz_acl)
-            if translated_acl == 'NotImplemented':
-                raise S3NotImplemented()
-            elif translated_acl == 'InvalidArgument':
-                raise InvalidArgument('x-amz-acl', amz_acl)
-
-            for header, acl in translated_acl:
-                req.headers[header] = acl
-
         xml = req.xml(MAX_PUT_BUCKET_BODY_SIZE)
 
         if req.query_string in ('lifecycle', 'lifecycle_rule'):
@@ -159,19 +158,23 @@ class BucketController(Controller):
             try:
                 elem = fromstring(xml, 'CreateBucketConfiguration')
                 location = elem.find('./LocationConstraint').text
-            except Exception as e:
-                LOGGER.debug(e)
+            except (XMLSyntaxError, DocumentInvalid):
                 raise MalformedXML()
+            except Exception as e:
+                LOGGER.error(e)
+                raise
 
-            if location != CONF.get('location'):
+            if location != CONF.location:
                 # Swift3 cannot support multiple reagions now.
                 raise InvalidLocationConstraint()
+
+        if 'HTTP_X_AMZ_ACL' in req.environ:
+            handle_acl_header(req)
 
         resp = req.get_response(self.app)
         if 'X-Lifecycle-Response' not in resp.headers:
             resp.status = HTTP_OK
         resp.location = '/' + req.container_name
-
         return resp
 
     def DELETE(self, req):

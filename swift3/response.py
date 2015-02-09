@@ -19,7 +19,7 @@ from functools import partial
 
 from swift.common import swob
 
-from swift3.utils import snake_to_camel
+from swift3.utils import snake_to_camel, sysmeta_prefix
 from swift3.etree import Element, SubElement, tostring
 
 
@@ -84,11 +84,24 @@ class Response(ResponseBase, swob.Response):
             # add double quotes to the etag header
             self.etag = self.etag
 
+        sw_sysmeta_headers = swob.HeaderKeyDict()
+        sw_headers = swob.HeaderKeyDict()
         headers = HeaderKeyDict()
+
         for key, val in self.headers.iteritems():
             _key = key.lower()
+            if _key.startswith(sysmeta_prefix('object')) or \
+                    _key.startswith(sysmeta_prefix('container')):
+                sw_sysmeta_headers[key] = val
+            else:
+                sw_headers[key] = val
+
+        # Handle swift headers
+        for key, val in sw_headers.iteritems():
+            _key = key.lower()
+
             if _key.startswith('x-object-meta-'):
-                headers['x-amz-meta-' + key[14:]] = val
+                headers['x-amz-meta-' + _key[14:]] = val
             elif _key in ('content-length', 'content-type',
                           'content-range', 'content-encoding',
                           'etag', 'last-modified'):
@@ -105,6 +118,7 @@ class Response(ResponseBase, swob.Response):
                 headers['x-amz-expiration'] = val
 
         self.headers = headers
+        self.sysmeta_headers = sw_sysmeta_headers
 
     @classmethod
     def from_swift_resp(cls, sw_resp):
@@ -125,11 +139,21 @@ class Response(ResponseBase, swob.Response):
 
         return resp
 
+    def append_copy_resp_body(self, controller_name):
+        elem = Element('Copy%sResult' % controller_name)
+        SubElement(elem, 'LastModified').text = \
+            self.last_modified.isoformat()[:-6] + '.000Z'
+        SubElement(elem, 'ETag').text = '"%s"' % self.etag
+        self.headers['Content-Type'] = 'application/xml'
+        self.body = tostring(elem)
+        self.etag = None
+
 
 HTTPOk = partial(Response, status=200)
 HTTPCreated = partial(Response, status=201)
 HTTPAccepted = partial(Response, status=202)
 HTTPNoContent = partial(Response, status=204)
+HTTPPartialContent = partial(Response, status=206)
 
 
 class ErrorResponse(ResponseBase, swob.HTTPException):

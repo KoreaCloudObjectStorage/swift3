@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import unittest
+from mock import patch
+from contextlib import nested
 from datetime import datetime
 import hashlib
 import base64
@@ -136,12 +138,10 @@ class TestSwift3Middleware(Swift3TestCase):
                'response-content-encoding&response-content-language&'
                'response-content-type&response-expires', {})
 
-        str1 = canonical_string('/', headers=
-                                {'Content-Type': None,
-                                 'X-Amz-Something': 'test'})
-        str2 = canonical_string('/', headers=
-                                {'Content-Type': '',
-                                 'X-Amz-Something': 'test'})
+        str1 = canonical_string('/', headers={'Content-Type': None,
+                                              'X-Amz-Something': 'test'})
+        str2 = canonical_string('/', headers={'Content-Type': '',
+                                              'X-Amz-Something': 'test'})
         str3 = canonical_string('/', headers={'X-Amz-Something': 'test'})
 
         self.assertEquals(str1, str2)
@@ -209,6 +209,12 @@ class TestSwift3Middleware(Swift3TestCase):
         self.assertEquals(status.split()[0], '200')
 
     def test_token_generation(self):
+        self.swift.register('HEAD', '/v1/AUTH_test/bucket+segments/'
+                                    'object/123456789abcdef',
+                            swob.HTTPOk, {}, None)
+        self.swift.register('PUT', '/v1/AUTH_test/bucket+segments/'
+                                   'object/123456789abcdef/1',
+                            swob.HTTPCreated, {}, None)
         req = Request.blank('/bucket/object?uploadId=123456789abcdef'
                             '&partNumber=1',
                             environ={'REQUEST_METHOD': 'PUT'})
@@ -219,62 +225,20 @@ class TestSwift3Middleware(Swift3TestCase):
             headers['X-Auth-Token']),
             'PUT\n\n\n/bucket/object?partNumber=1&uploadId=123456789abcdef')
 
-    def test_xml_namespace(self):
-        def test_xml(ns, prefix):
-            return \
-                '<AccessControlPolicy %(ns)s>' \
-                '<Owner><ID>id</ID></Owner>' \
-                '<AccessControlList>' \
-                '<Grant>' \
-                '<Grantee ' \
-                ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' \
-                ' xsi:type="Group">' \
-                '<URI>http://acs.amazonaws.com/groups/global/AllUsers</URI>' \
-                '</Grantee>' \
-                '<%(prefix)sPermission>READ</%(prefix)sPermission>' \
-                '</Grant>' \
-                '</AccessControlList>' \
-                '</AccessControlPolicy>' % ({'ns': ns, 'prefix': prefix})
-
-        xml = test_xml('', '')
-        req = Request.blank('/bucket?acl',
-                            environ={'REQUEST_METHOD': 'PUT'},
-                            headers={'Authorization': 'AWS test:tester:hmac'},
-                            body=xml)
-        status, headers, body = self.call_swift3(req)
-        self.assertEquals(status.split()[0], '200')
-
-        xml = test_xml('xmlns="http://example.com/"', '')
-        req = Request.blank('/bucket?acl',
-                            environ={'REQUEST_METHOD': 'PUT'},
-                            headers={'Authorization': 'AWS test:tester:hmac'},
-                            body=xml)
-        status, headers, body = self.call_swift3(req)
-        self.assertEquals(status.split()[0], '200')
-
-        xml = test_xml('xmlns:s3="http://s3.amazonaws.com/doc/2006-03-01/"',
-                       's3:')
-        req = Request.blank('/bucket?acl',
-                            environ={'REQUEST_METHOD': 'PUT'},
-                            headers={'Authorization': 'AWS test:tester:hmac'},
-                            body=xml)
-        status, headers, body = self.call_swift3(req)
-        self.assertEquals(status.split()[0], '200')
-
-        xml = test_xml('xmlns:s3="http://example.com/"', 's3:')
-        req = Request.blank('/bucket?acl',
-                            environ={'REQUEST_METHOD': 'PUT'},
-                            headers={'Authorization': 'AWS test:tester:hmac'},
-                            body=xml)
-        status, headers, body = self.call_swift3(req)
-        self.assertEquals(self._get_error_code(body), 'MalformedACLError')
-
     def test_invalid_uri(self):
         req = Request.blank('/bucket/invalid\xffname',
                             environ={'REQUEST_METHOD': 'GET'},
                             headers={'Authorization': 'AWS test:tester:hmac'})
         status, headers, body = self.call_swift3(req)
         self.assertEquals(self._get_error_code(body), 'InvalidURI')
+
+    def test_object_create_bad_md5_unreadable(self):
+        req = Request.blank('/bucket/object',
+                            environ={'REQUEST_METHOD': 'PUT',
+                                     'HTTP_AUTHORIZATION': 'AWS X:Y:Z',
+                                     'HTTP_CONTENT_MD5': '#'})
+        status, headers, body = self.call_swift3(req)
+        self.assertEquals(self._get_error_code(body), 'InvalidDigest')
 
     def test_invalid_metadata_directive(self):
         req = Request.blank('/',
@@ -350,6 +314,68 @@ class TestSwift3Middleware(Swift3TestCase):
         self.assertEquals(elem.find('./Code').text, 'MethodNotAllowed')
         self.assertEquals(elem.find('./Method').text, 'POST')
         self.assertEquals(elem.find('./ResourceType').text, 'ACL')
+
+    def test_check_pipeline(self):
+        with nested(patch("swift3.middleware.CONF"),
+                    patch("swift3.middleware.PipelineWrapper"),
+                    patch("swift3.middleware.loadcontext")) as \
+                (conf, pipeline, _):
+            conf.auth_pipeline_check = True
+            conf.__file__ = ''
+
+            pipeline.return_value = 'swift3 tempauth proxy-server'
+            self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'swift3 s3token authtoken keystoneauth ' \
+                'proxy-server'
+            self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'swift3 swauth proxy-server'
+            self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'swift3 authtoken s3token keystoneauth ' \
+                'proxy-server'
+            with self.assertRaises(ValueError):
+                self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'swift3 proxy-server'
+            with self.assertRaises(ValueError):
+                self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'proxy-server'
+            with self.assertRaises(ValueError):
+                self.swift3.check_pipeline(conf)
+
+    def test_swift3_initialization_with_disabled_pipeline_check(self):
+        with nested(patch("swift3.middleware.CONF"),
+                    patch("swift3.middleware.PipelineWrapper"),
+                    patch("swift3.middleware.loadcontext")) as \
+                (conf, pipeline, _):
+            # Disable pipeline check
+            conf.auth_pipeline_check = False
+            conf.__file__ = ''
+
+            pipeline.return_value = 'swift3 tempauth proxy-server'
+            self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'swift3 s3token authtoken keystoneauth ' \
+                'proxy-server'
+            self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'swift3 swauth proxy-server'
+            self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'swift3 authtoken s3token keystoneauth ' \
+                'proxy-server'
+            self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'swift3 proxy-server'
+            self.swift3.check_pipeline(conf)
+
+            pipeline.return_value = 'proxy-server'
+            with self.assertRaises(ValueError):
+                self.swift3.check_pipeline(conf)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -14,18 +14,51 @@
 # limitations under the License.
 
 from swift.common.http import HTTP_OK
+from swift.common.swob import Range, content_range_header_value
 
 from swift3.controllers.base import Controller
-from swift3.response import AccessDenied, HTTPOk
-from swift3.etree import Element, SubElement, tostring
+from swift3.response import S3NotImplemented, InvalidRange, HTTPPartialContent
 
 
 class ObjectController(Controller):
     """
     Handles requests on objects
     """
+    def _gen_head_range_resp(self, req_range, resp):
+        """
+        Swift doesn't handle Range header for HEAD requests.
+        So, this mothod generates HEAD range response from HEAD response.
+        S3 return HEAD range response, if the value of range satisfies the
+        conditions which are described in the following document.
+        - http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
+        """
+        length = long(resp.headers.get('Content-Length'))
+
+        try:
+            content_range = Range(req_range)
+        except ValueError:
+            return resp
+
+        ranges = content_range.ranges_for_length(length)
+        if ranges == []:
+            raise InvalidRange()
+        elif ranges:
+            if len(ranges) == 1:
+                start, end = ranges[0]
+                resp.headers['Content-Range'] = \
+                    content_range_header_value(start, end, length)
+                resp.headers['Content-Length'] = (end - start)
+                return HTTPPartialContent(headers=resp.headers)
+            else:
+                # TODO: It is necessary to confirm whether need to respond to
+                #       multi-part response.(e.g. bytes=0-10,20-30)
+                pass
+
+        return resp
+
     def GETorHEAD(self, req):
         resp = req.get_response(self.app)
+
         if req.method == 'HEAD':
             resp.app_iter = None
 
@@ -41,7 +74,13 @@ class ObjectController(Controller):
         """
         Handle HEAD Object request
         """
-        return self.GETorHEAD(req)
+        resp = self.GETorHEAD(req)
+
+        if 'range' in req.headers:
+            req_range = req.headers['range']
+            resp = self._gen_head_range_resp(req_range, resp)
+
+        return resp
 
     def GET(self, req):
         """
@@ -53,16 +92,13 @@ class ObjectController(Controller):
         """
         Handle PUT Object and PUT Object (Copy) request
         """
+        req.check_copy_source(self.app)
         resp = req.get_response(self.app)
 
-        if 'HTTP_X_COPY_FROM' in req.environ:
-            elem = Element('CopyObjectResult')
-            SubElement(elem, 'ETag').text = '"%s"' % resp.etag
-            body = tostring(elem, use_s3ns=False)
-            return HTTPOk(body=body)
+        if 'X-Amz-Copy-Source' in req.headers:
+            resp.append_copy_resp_body(req.controller_name)
 
         resp.status = HTTP_OK
-
         return resp
 
     def POST(self, req):
