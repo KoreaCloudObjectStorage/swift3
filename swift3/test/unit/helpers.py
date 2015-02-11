@@ -19,6 +19,8 @@ from copy import deepcopy
 from hashlib import md5
 from swift.common import swob
 from swift.common.utils import split_path
+from swift.common.request_helpers import is_sys_meta
+from swift3.cfg import CONF
 
 
 class FakeSwift(object):
@@ -34,7 +36,30 @@ class FakeSwift(object):
         # mapping of (method, path) --> (response class, headers, body)
         self._responses = {}
 
+    def _fake_auth_middleware(self, env):
+        if 'swift.authorize_override' in env:
+            return
+
+        if 'HTTP_AUTHORIZATION' not in env:
+            return
+
+        _, authorization = env['HTTP_AUTHORIZATION'].split(' ')
+        tenant_user, sign = authorization.rsplit(':', 1)
+        tenant, user = tenant_user.rsplit(':', 1)
+
+        path = env['PATH_INFO']
+        env['PATH_INFO'] = path.replace(tenant_user, 'AUTH_' + tenant)
+
+        env['REMOTE_USER'] = 'authorized'
+
+        # AccessDenied by default
+        env['swift.authorize'] = lambda req: swob.HTTPForbidden(request=req)
+
     def __call__(self, env, start_response):
+        if CONF.s3_acl:
+            self._fake_auth_middleware(env)
+
+        req = swob.Request(env)
         method = env['REQUEST_METHOD']
         path = env['PATH_INFO']
         _, acc, cont, obj = split_path(env['PATH_INFO'], 0, 4,
@@ -43,11 +68,11 @@ class FakeSwift(object):
             path += '?' + env['QUERY_STRING']
 
         if 'swift.authorize' in env:
-            resp = env['swift.authorize']()
+            resp = env['swift.authorize'](req)
             if resp:
                 return resp(env, start_response)
 
-        headers = swob.Request(env).headers
+        headers = req.headers
         self._calls.append((method, path, headers))
         self.swift_sources.append(env.get('swift.source'))
 
@@ -55,6 +80,8 @@ class FakeSwift(object):
             resp_class, raw_headers, body = self._responses[(method, path)]
             headers = swob.HeaderKeyDict(raw_headers)
         except KeyError:
+            # FIXME: suppress print state error for python3 compatibility.
+            # pylint: disable-msg=E1601
             if (env.get('QUERY_STRING')
                     and (method, env['PATH_INFO']) in self._responses):
                 resp_class, raw_headers, body = self._responses[
@@ -84,7 +111,6 @@ class FakeSwift(object):
                 self.uploaded[path][0]['Content-Type'] = env["CONTENT_TYPE"]
 
         # range requests ought to work, hence conditional_response=True
-        req = swob.Request(env)
         resp = resp_class(req=req, headers=headers, body=body,
                           conditional_response=True)
         return resp(env, start_response)
@@ -102,4 +128,17 @@ class FakeSwift(object):
         return len(self._calls)
 
     def register(self, method, path, response_class, headers, body):
+        # assuming the path format like /v1/account/container/object
+        resource_map = ['account', 'container', 'object']
+        index = len(split_path(path, 0, 3, True)[1:]) - 1
+        resource = resource_map[index]
+
+        if (method, path) in self._responses:
+            old_headers = self._responses[(method, path)][1]
+            headers = headers.copy()
+            for key, value in old_headers.iteritems():
+                if is_sys_meta(resource, key) and key not in headers:
+                    # keep old sysmeta for s3acl
+                    headers.update({key: value})
+
         self._responses[(method, path)] = (response_class, headers, body)

@@ -51,27 +51,21 @@ following for an SAIO setup::
         is_secure=False,
         calling_format=boto.s3.connection.OrdinaryCallingFormat())
 """
-
 import rfc822
 
 from cStringIO import StringIO
+from paste.deploy import loadwsgi
 
-from swift.common.utils import get_logger, iter_multipart_mime_documents, \
-    parse_content_disposition
+from swift.common.wsgi import PipelineWrapper, loadcontext
 
 from swift3.exception import NotS3Request
-from swift3.request import Request
-from swift3.response import HTTPOk, ErrorResponse, InternalError, MethodNotAllowed, \
-    ResponseBase
+from swift3.request import Request, S3AclRequest
+from swift3.response import ErrorResponse, InternalError, MethodNotAllowed, \
+    ResponseBase, HTTPOk
 from swift3.cfg import CONF
-
-# List of  sub-resources that must be maintained as part of the HMAC
-# signature string.
-ALLOWED_SUB_RESOURCES = sorted([
-    'acl', 'delete', 'lifecycle', 'location', 'logging', 'notification',
-    'partNumber', 'policy', 'requestPayment', 'torrent', 'uploads', 'uploadId',
-    'versionId', 'versioning', 'versions ', 'website'
-])
+from swift3.utils import LOGGER
+from swift.common.utils import get_logger, iter_multipart_mime_documents, \
+    parse_content_disposition
 
 #: The size of data to read from the form at any given time.
 READ_CHUNK_SIZE = 4096
@@ -79,25 +73,28 @@ READ_CHUNK_SIZE = 4096
 
 class Swift3Middleware(object):
     """Swift3 S3 compatibility midleware"""
-
-    def __init__(self, app, *args, **kwargs):
+    def __init__(self, app, conf, *args, **kwargs):
         self.app = app
-        self.logger = get_logger(CONF, log_route='swift3')
+        self.slo_enabled = True
+        self.check_pipeline(conf)
         self.storage_domain = CONF.get('storage_domain', 'example.com')
+        self.logger = get_logger(conf, log_route='swift3')
 
     def __call__(self, env, start_response):
         try:
-            # CORS
             resp = self.cors(env)
+            if resp:
+                return resp
 
-            if not resp:
-                # SubdomainCallingFormat
+            if CONF.s3_acl:
+                req = S3AclRequest(env, self.app, self.slo_enabled)
+            else:
                 self.domain_remap(env)
 
                 # POST
                 self.post_request(env)
 
-                req = Request(env)
+                req = Request(env, self.slo_enabled)
 
                 if req.is_service_request:
                     env['swift.source'] = 'account'
@@ -106,15 +103,15 @@ class Swift3Middleware(object):
                 elif req.is_object_request:
                     env['swift.source'] = 'object'
 
-                resp = self.handle_request(req)
+            resp = self.handle_request(req)
         except NotS3Request:
             resp = self.app
         except ErrorResponse as err_resp:
             if isinstance(err_resp, InternalError):
-                self.logger.exception(err_resp)
+                LOGGER.exception(err_resp)
             resp = err_resp
-        except Exception, e:
-            self.logger.exception(e)
+        except Exception as e:
+            LOGGER.exception(e)
             resp = InternalError(reason=e)
 
         if isinstance(resp, ResponseBase) and 'swift.trans_id' in env:
@@ -235,11 +232,10 @@ class Swift3Middleware(object):
         return attributes
 
     def handle_request(self, req):
-        self.logger.debug('Calling Swift3 Middleware')
-        self.logger.debug(req.__dict__)
+        LOGGER.debug('Calling Swift3 Middleware')
+        LOGGER.debug(req.__dict__)
 
         controller = req.controller(self.app)
-
         if hasattr(controller, req.method):
             res = getattr(controller, req.method)(req)
         else:
@@ -248,10 +244,75 @@ class Swift3Middleware(object):
 
         return res
 
+    def check_pipeline(self, conf):
+        """
+        Check that proxy-server.conf has an appropriate pipeline for swift3.
+        """
+        if conf.get('__file__', None) is None:
+            return
+
+        ctx = loadcontext(loadwsgi.APP, conf.__file__)
+        pipeline = str(PipelineWrapper(ctx)).split(' ')
+
+        # Add compatible with 3rd party middleware.
+        if check_filter_order(pipeline,
+                              ['swift3', 'proxy-server']):
+
+            auth_pipeline = pipeline[pipeline.index('swift3') + 1:
+                                     pipeline.index('proxy-server')]
+
+            # Check SLO middleware
+            if 'slo' not in auth_pipeline:
+                self.slo_enabled = False
+                LOGGER.warning('swift3 middleware is required SLO middleware '
+                               'to support multi-part upload, please add it '
+                               'in pipline')
+
+            if not conf.auth_pipeline_check:
+                LOGGER.debug('Skip pipeline auth check.')
+                return
+
+            if 'tempauth' in auth_pipeline:
+                LOGGER.debug('Use tempauth middleware.')
+                return
+            elif 'keystoneauth' in auth_pipeline:
+                if check_filter_order(auth_pipeline,
+                                      ['s3token',
+                                       'authtoken',
+                                       'keystoneauth']):
+                    LOGGER.debug('Use keystone middleware.')
+                    return
+
+            elif len(auth_pipeline):
+                LOGGER.debug('Use third party(unknown) auth middleware.')
+                return
+
+        raise ValueError('Invalid proxy pipeline: %s' % pipeline)
+
+
+def check_filter_order(pipeline, required_filters):
+    """
+    Check that required filters are present in order in the pipeline.
+    """
+    try:
+        indexes = [pipeline.index(f) for f in required_filters]
+    except ValueError as e:
+        LOGGER.debug(e)
+        return False
+
+    return indexes == sorted(indexes)
+
 
 def filter_factory(global_conf, **local_conf):
     """Standard filter factory to use the middleware with paste.deploy"""
     CONF.update(global_conf)
     CONF.update(local_conf)
 
-    return Swift3Middleware
+    # Reassign config to logger
+    global LOGGER
+    LOGGER = get_logger(CONF, log_route='swift3')
+
+    def swift3_filter(app):
+        return Swift3Middleware(app, CONF)
+
+    return swift3_filter

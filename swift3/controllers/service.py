@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from simplejson import loads
+from swift.common.utils import json
 
 from swift3.controllers.base import Controller
 from swift3.etree import Element, SubElement, tostring
-from swift3.response import HTTPOk
+from swift3.response import HTTPOk, AccessDenied, NoSuchBucket
+from swift3.utils import validate_bucket_name
+from swift3.cfg import CONF
 
 
 class ServiceController(Controller):
@@ -30,7 +32,11 @@ class ServiceController(Controller):
         """
         resp = req.get_response(self.app, query={'format': 'json'})
 
-        containers = loads(resp.body)
+        containers = json.loads(resp.body)
+
+        containers = filter(
+            lambda item: validate_bucket_name(item['name']), containers)
+
         # we don't keep the creation time of a backet (s3cmd doesn't
         # work without that) so we use something bogus.
         elem = Element('ListAllMyBucketsResult')
@@ -41,6 +47,14 @@ class ServiceController(Controller):
 
         buckets = SubElement(elem, 'Buckets')
         for c in containers:
+            if CONF.s3_acl and CONF.check_bucket_owner:
+                try:
+                    req.get_response(self.app, 'HEAD', c['name'])
+                except AccessDenied:
+                    continue
+                except NoSuchBucket:
+                    continue
+
             bucket = SubElement(buckets, 'Bucket')
             SubElement(bucket, 'Name').text = c['name']
             SubElement(bucket, 'CreationDate').text = \

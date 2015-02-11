@@ -17,9 +17,10 @@ import unittest
 
 from swift.common import swob
 
-from swift3 import middleware as swift3
+from swift3.middleware import Swift3Middleware
 from swift3.test.unit.helpers import FakeSwift
 from swift3.etree import fromstring
+from swift3.cfg import CONF
 
 
 class FakeApp(object):
@@ -38,6 +39,7 @@ class FakeApp(object):
         tenant, user = tenant_user.rsplit(':', 1)
 
         path = env['PATH_INFO']
+
         env['PATH_INFO'] = path.replace(tenant_user, 'AUTH_' + tenant)
 
     def __call__(self, env, start_response):
@@ -50,15 +52,14 @@ class FakeApp(object):
 class Swift3TestCase(unittest.TestCase):
     def __init__(self, name):
         unittest.TestCase.__init__(self, name)
-        self.conf = {
-            'log_level': 'debug',
-            'storage_domain': 'localhost',
-        }
+
+        CONF.log_level = 'debug',
+        CONF.storage_domain = 'localhost'
 
     def setUp(self):
         self.app = FakeApp()
         self.swift = self.app.swift
-        self.swift3 = swift3.filter_factory(self.conf)(self.app)
+        self.swift3 = Swift3Middleware(self.app, CONF)
 
         self.swift.register('HEAD', '/v1/AUTH_test/bucket',
                             swob.HTTPNoContent, {}, None)

@@ -15,13 +15,9 @@
 
 import functools
 
-from swift.common.utils import get_logger
-
 from swift3.response import S3NotImplemented, InvalidRequest
-from swift3.utils import camel_to_snake
-from swift3.cfg import CONF
+from swift3.utils import LOGGER, camel_to_snake
 
-LOGGER = get_logger(CONF, log_route='swift3')
 
 def bucket_operation(func=None, err_resp=None, err_msg=None):
     """
@@ -48,6 +44,7 @@ def bucket_operation(func=None, err_resp=None, err_msg=None):
         return _bucket_operation(func)
     else:
         return _bucket_operation
+
 
 def object_operation(func):
     """

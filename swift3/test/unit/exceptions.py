@@ -1,4 +1,4 @@
-# Copyright (c) 2014 OpenStack Foundation.
+# Copyright (c) 2013 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,21 +14,5 @@
 # limitations under the License.
 
 
-class S3Exception(Exception):
-    pass
-
-
-class NotS3Request(S3Exception):
-    pass
-
-
-class BadSwiftRequest(S3Exception):
-    pass
-
-
-class ACLError(S3Exception):
-    pass
-
-
-class InvalidSubresource(S3Exception):
+class NotMethodException(Exception):
     pass

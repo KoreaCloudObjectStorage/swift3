@@ -15,23 +15,30 @@
 
 import unittest
 
-from swift3 import utils
-
-strs = [
-    ('Owner', 'owner'),
-    ('DisplayName', 'display_name'),
-    ('AccessControlPolicy', 'access_control_policy'),
-]
+from swift3.cfg import Config
 
 
-class TestSwift3Utils(unittest.TestCase):
-    def test_camel_to_snake(self):
-        for s1, s2 in strs:
-            self.assertEquals(utils.camel_to_snake(s1), s2)
+class TestSwift3Cfg(unittest.TestCase):
+    def test_config(self):
+        conf = Config(
+            {
+                'a': 'str',
+                'b': 10,
+                'c': True,
+            }
+        )
 
-    def test_snake_to_camel(self):
-        for s1, s2 in strs:
-            self.assertEquals(s1, utils.snake_to_camel(s2))
+        conf.update(
+            {
+                'a': 'str2',
+                'b': '100',
+                'c': 'false',
+            }
+        )
+
+        self.assertEquals(conf['a'], 'str2')
+        self.assertEquals(conf['b'], 100)
+        self.assertEquals(conf['c'], False)
 
 if __name__ == '__main__':
     unittest.main()
