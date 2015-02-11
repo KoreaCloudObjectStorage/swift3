@@ -525,6 +525,7 @@ class Request(swob.Request):
                     HTTP_OK,
                 ],
                 'DELETE': [
+                    HTTP_OK,
                     HTTP_NO_CONTENT,
                 ],
             }

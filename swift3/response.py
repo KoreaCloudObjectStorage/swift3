@@ -116,6 +116,8 @@ class Response(ResponseBase, swob.Response):
                 headers['x-lifecycle-response'] = val
             elif _key == 'x-amz-expiration':
                 headers['x-amz-expiration'] = val
+            elif _key == 'x-static-large-object':
+                headers['x-static-large-object'] = val
 
         self.headers = headers
         self.sysmeta_headers = sw_sysmeta_headers

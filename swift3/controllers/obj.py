@@ -17,7 +17,7 @@ from swift.common.http import HTTP_OK
 from swift.common.swob import Range, content_range_header_value
 
 from swift3.controllers.base import Controller
-from swift3.response import S3NotImplemented, InvalidRange, HTTPPartialContent
+from swift3.response import NoSuchKey
 
 
 class ObjectController(Controller):
@@ -108,4 +108,15 @@ class ObjectController(Controller):
         """
         Handle DELETE Object request
         """
-        return req.get_response(self.app)
+        try:
+            resp = req.get_response(self.app, method='HEAD')
+        except NoSuchKey as e:
+            return e
+        if resp.status_int == 200 and 'X-Static-Large-Object' in resp.headers:
+            req.params['multipart-manifest'] = 'delete'
+            resp = req.get_response(self.app)
+            resp.status_int = 204
+            return resp
+
+        else:
+            return req.get_response(self.app)

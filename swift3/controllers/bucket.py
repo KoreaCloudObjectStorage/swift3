@@ -184,20 +184,44 @@ class BucketController(Controller):
         if req.params:
             return req.get_response(self.app)
 
+        original_resp = req.get_response(self.app)
+
+        """
+        Deleting _segments container and its objects for remaining segments
+        """
         head_req = copy(req)
         container = head_req.container_name
         head_req.container_name = container + '_segments'
         try:
-            resp = head_req.get_response(self.app, 'HEAD')
+            more_result = True
+            d = ''
+            seg = None
+            while more_result:
+                resp = head_req.get_response(self.app, 'GET',
+                                             query={'format': 'json',
+                                                    'marker': d})
+                segments = json.loads(resp.body)
+                for seg in segments:
+                    head_req.get_response(self.app, 'DELETE', obj=seg['name'])
+                if seg:
+                    d = seg['name']
+                    seg = None
+                else:
+                    more_result = False
+
             resp = head_req.get_response(self.app, 'DELETE')
         except NoSuchBucket as e:
             # If _segments bucket is not exist, exception will be occurence.
             pass
 
+        """
+        Deleting container lifecycle
+        """
         head_req.container_name = container
-        head_req.get_response(self.app, 'DELETE', query={'lifecycle': ''})
+        head_req.get_response(self.app, 'DELETE', query={'lifecycle': '',
+                                                         'force_delete': ''})
 
-        return req.get_response(self.app)
+        return original_resp
 
     def POST(self, req):
         """
