@@ -28,7 +28,7 @@ from urllib import unquote
 from swift3.cfg import CONF
 
 LOGGER = get_logger(CONF, log_route='swift3')
-MULTIUPLOAD_SUFFIX = '+segments'
+MULTIUPLOAD_SUFFIX = '_segments'
 
 
 def sysmeta_prefix(resource):
