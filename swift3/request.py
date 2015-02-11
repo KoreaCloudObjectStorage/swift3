@@ -613,10 +613,6 @@ class Request(swob.Request):
         sw_req = self.to_swift_req(method, container, obj, headers=headers,
                                    body=body, query=query)
 
-        if self.container_name.endswith('_segments') and \
-           method not in ('GET', 'HEAD'):
-            raise InvalidURI(self.path)
-
         sw_resp = sw_req.get_response(app)
         resp = Response.from_swift_resp(sw_resp)
         status = resp.status_int  # pylint: disable-msg=E1101
