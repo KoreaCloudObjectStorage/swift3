@@ -189,8 +189,7 @@ class BucketController(Controller):
         head_req.container_name = container + '_segments'
         try:
             resp = head_req.get_response(self.app, 'HEAD')
-            sw_req = head_req.to_swift_req(method='DELETE')
-            resp = sw_req.get_response(self.app)
+            resp = head_req.get_response(self.app, 'DELETE')
         except NoSuchBucket as e:
             # If _segments bucket is not exist, exception will be occurence.
             pass
