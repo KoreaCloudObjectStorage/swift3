@@ -447,6 +447,9 @@ class Request(swob.Request):
         if method is not None:
             env['REQUEST_METHOD'] = method
 
+        if method and method != 'PUT':
+            env['CONTENT_LENGTH'] = '0'
+
         env['HTTP_X_AUTH_TOKEN'] = self.token
 
         if obj:
