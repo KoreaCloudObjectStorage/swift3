@@ -84,7 +84,7 @@ class Swift3Middleware(object):
         try:
             resp = self.cors(env)
             if resp:
-                return resp
+                return resp(env, start_response)
 
             if CONF.s3_acl:
                 req = S3AclRequest(env, self.app, self.slo_enabled)
