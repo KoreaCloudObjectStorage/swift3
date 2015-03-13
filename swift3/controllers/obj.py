@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from swift.common.http import HTTP_OK
+from swift.common.http import HTTP_OK, HTTP_NO_CONTENT
 from swift.common.swob import Range, content_range_header_value
 
 from swift3.controllers.base import Controller
@@ -115,7 +115,9 @@ class ObjectController(Controller):
         if resp.status_int == 200 and 'X-Static-Large-Object' in resp.headers:
             req.params['multipart-manifest'] = 'delete'
             resp = req.get_response(self.app)
-            resp.status_int = 204
+            resp.status = HTTP_NO_CONTENT
+            resp.contents_length = 0
+            resp.body = ''
             return resp
 
         else:
