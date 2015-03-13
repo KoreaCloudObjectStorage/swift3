@@ -115,6 +115,7 @@ class ObjectController(Controller):
         if resp.status_int == 200 and 'X-Static-Large-Object' in resp.headers:
             req.params['multipart-manifest'] = 'delete'
             resp = req.get_response(self.app)
+            t = resp.body  # read body to complete delete operation
             resp.status = HTTP_NO_CONTENT
             resp.contents_length = 0
             resp.body = ''
