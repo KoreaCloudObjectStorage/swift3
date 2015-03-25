@@ -112,10 +112,8 @@ class BucketController(Controller):
             if 'name' not in o:
                 continue
 
-            path = resp.request.path_info + '/' + o['name']
-            oreq = make_pre_authed_request(req.environ, method='HEAD',
-                                           path=path)
-            oresp = oreq.get_response(self.app)
+            oresp = req.get_response(self.app, 'HEAD', req.container_name,
+                                     o['name'])
             if 'X-Object-Meta-Glacier' in oresp.headers:
                 o['class'] = 'GLACIER'
             else:
