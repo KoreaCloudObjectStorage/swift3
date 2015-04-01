@@ -498,7 +498,6 @@ class Request(swob.Request):
                 'PUT': [
                     HTTP_CREATED,
                     HTTP_OK,
-                    HTTP_ACCEPTED,
                 ],
                 'POST': [
                     HTTP_NO_CONTENT,
