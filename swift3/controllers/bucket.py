@@ -113,7 +113,7 @@ class BucketController(Controller):
                 continue
 
             oresp = req.get_response(self.app, 'HEAD', req.container_name,
-                                     o['name'])
+                                     o['name'].encode('utf-8'))
             if 'X-Object-Meta-Glacier' in oresp.headers:
                 o['class'] = 'GLACIER'
             else:
