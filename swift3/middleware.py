@@ -168,7 +168,7 @@ class Swift3Middleware(object):
             return
 
         env['PATH_INFO'] = '/' + bucket_name + env['PATH_INFO']
-        env['RAW_PATH_INFO'] = env['PATH_INFO']
+        env['RAW_PATH_INFO'] = '/' + bucket_name + env['RAW_PATH_INFO']
         env[key] = env[key][len(bucket_name) + 1:]
 
         self.logger.debug('Calling Swift3 Middleware - Domain is remapped')
