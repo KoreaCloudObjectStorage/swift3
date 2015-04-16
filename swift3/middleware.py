@@ -53,6 +53,7 @@ following for an SAIO setup::
 """
 import rfc822
 
+import urllib
 from cStringIO import StringIO
 from paste.deploy import loadwsgi
 
@@ -145,6 +146,9 @@ class Swift3Middleware(object):
             key = 'HTTP_HOST'
         elif 'SERVER_NAME' in env:
             key = 'SERVER_NAME'
+
+        if 'RAW_PATH_INFO' in env:
+            env['RAW_PATH_INFO'] = urllib.quote(urllib.unquote(env['RAW_PATH_INFO']))
 
         if not key:
             return
